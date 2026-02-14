@@ -17,8 +17,11 @@ public:
   // Deal one card from the top
   Card deal();
 
-  // How many cards left?
+  // cards left
   size_t count() const { return cards.size(); }
+
+  // get remaining cards (needed for equity calc)
+  std::vector<Card> getCards() const { return cards; }
 
 private:
   std::vector<Card> cards; // the deck

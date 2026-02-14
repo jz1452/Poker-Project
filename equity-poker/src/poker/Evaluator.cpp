@@ -5,7 +5,7 @@
 
 namespace poker {
 
-// Paul Senzee's Perfect Hash Function
+// Perfect Hash Function
 static unsigned find_fast(unsigned u) {
   unsigned a, b, r;
   u += 0xe91aaa35;
@@ -45,11 +45,10 @@ int Evaluator::evaluate(const std::vector<Card> &cards) {
     return evaluate5(cards[0], cards[1], cards[2], cards[3], cards[4]);
   }
 
-  // If 7 cards -> Loop 21 combinations
   int bestScore = 9999;
   int n = cards.size();
 
-  // Hardcoded loops for clarity and speed
+  // If 6 or 7 cards -> Loop 21 combinations
   for (int i = 0; i < n - 4; i++) {
     for (int j = i + 1; j < n - 3; j++) {
       for (int k = j + 1; k < n - 2; k++) {
@@ -77,7 +76,6 @@ int Evaluator::evaluate5(const Card &c1_obj, const Card &c2_obj,
   int c4 = convert_card(c4_obj);
   int c5 = convert_card(c5_obj);
 
-  // Paul Senzee Logic
   int q = (c1 | c2 | c3 | c4 | c5) >> 16;
   short s;
 

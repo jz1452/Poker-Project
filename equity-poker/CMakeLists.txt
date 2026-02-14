@@ -19,3 +19,7 @@ target_include_directories(poker_sim PRIVATE ${CMAKE_SOURCE_DIR})
 # Target 2: The Deck Test (Phase 1)
 add_executable(test_deck tests/TestDeck.cpp ${POKER_LIB_SOURCES})
 target_include_directories(test_deck PRIVATE ${CMAKE_SOURCE_DIR})
+
+# Target 3: The Equity Test (Phase 2)
+add_executable(test_equity tests/TestEquity.cpp ${POKER_LIB_SOURCES})
+target_include_directories(test_equity PRIVATE ${CMAKE_SOURCE_DIR})
