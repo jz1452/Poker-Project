@@ -7,17 +7,11 @@
 
 namespace poker {
 
-// The core "Bitwise" Card representation.
-// We use a single byte (uint8_t) to represent a card.
-//
-// Bits 0-3: Rank (0-12) -> 2, 3, 4, 5, 6, 7, 8, 9, T, J, Q, K, A
-// Bits 4-5: Suit (0-3)  -> Clubs(0), Diamonds(1), Hearts(2), Spades(3)
-// Bits 6-7: Reserved (0)
-//
-// Example: Ace of Spades
-// Rank: Ace = 12 (1100 binary)
-// Suit: Spades = 3 (11 binary)
-// Binary: 00 11 1100 -> 0x3C (Decimal 60)
+// Represents a card
+// Just using one byte for efficiency
+// structure: ssssrrrr (actually just using lower bits mostly)
+// 0-3: rank, 4-5: suit
+// basically a char
 
 struct Card {
   uint8_t val;
@@ -39,6 +33,17 @@ struct Card {
 
   // Constants
   static const int RANK_2 = 0;
+  static const int RANK_3 = 1;
+  static const int RANK_4 = 2;
+  static const int RANK_5 = 3;
+  static const int RANK_6 = 4;
+  static const int RANK_7 = 5;
+  static const int RANK_8 = 6;
+  static const int RANK_9 = 7;
+  static const int RANK_T = 8;
+  static const int RANK_J = 9;
+  static const int RANK_Q = 10;
+  static const int RANK_K = 11;
   static const int RANK_A = 12;
   static const int SUIT_CLUBS = 0;
   static const int SUIT_DIAMONDS = 1;
@@ -48,7 +53,7 @@ struct Card {
   // Output
   std::string toString() const;
 
-  // Static Helpers
+  // Make a card from string (e.g. "Ah")
   static Card fromString(const std::string &s);
 };
 

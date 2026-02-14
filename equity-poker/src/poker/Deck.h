@@ -6,17 +6,18 @@
 
 namespace poker {
 
+// Basic 52-card deck
 class Deck {
 public:
   Deck();
 
-  // re-fill the deck with 52 cards and shuffle
-  void shuffle(std::mt19937 &rng); // Mersenne Twister
+  // Shuffle using a random number generator
+  void shuffle(std::mt19937 &rng);
 
-  // deals 1 card. Returns the Card object.
+  // Deal one card from the top
   Card deal();
 
-  // shows how many cards in the deck
+  // How many cards left?
   size_t count() const { return cards.size(); }
 
 private:
