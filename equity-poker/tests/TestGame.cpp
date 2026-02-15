@@ -12,9 +12,17 @@ void testSitStand() {
   Lobby lobby;
   Game &g = lobby.getGame();
 
-  assert(lobby.sitPlayer("p1", "Player 1", 0) == 0);
-  assert(lobby.sitPlayer("p2", "Player 2", 1) == 1);
-  assert(lobby.sitPlayer("p3", "Player 3", 0) == -1); // Seat taken
+  // Must join before sitting
+  assert(lobby.join("p1", "Player 1") == true);
+  assert(lobby.join("p2", "Player 2") == true);
+  assert(lobby.join("p3", "Player 3") == true);
+
+  assert(lobby.sitPlayer("p1", 0, 1000) == 0);
+  assert(lobby.sitPlayer("p2", 1, 1000) == 1);
+  assert(lobby.sitPlayer("p3", 0, 1000) == -1); // Seat taken
+
+  // Can't sit without joining
+  assert(lobby.sitPlayer("unknown", 2, 1000) == -1);
 
   assert(g.getSeats()[0].name == "Player 1");
   assert(lobby.standPlayer("p1") == true);
@@ -32,11 +40,16 @@ void testBasicHand() {
   Lobby lobby(conf);
   Game &g = lobby.getGame();
 
-  lobby.sitPlayer("p1", "Alice", 0);
-  lobby.sitPlayer("p2", "Bob", 1);
-  lobby.sitPlayer("p3", "Charlie", 2);
+  lobby.join("p1", "Alice");
+  lobby.join("p2", "Bob");
+  lobby.join("p3", "Charlie");
 
-  g.startHand();
+  lobby.sitPlayer("p1", 0, 1000);
+  lobby.sitPlayer("p2", 1, 1000);
+  lobby.sitPlayer("p3", 2, 1000);
+
+  // p1 is host (first to join)
+  assert(lobby.startGame("p1") == true);
 
   // Check Blinds
   int countSB = 0;
@@ -70,33 +83,26 @@ void testSidePots() {
   Lobby lobby(conf);
   Game &g = lobby.getGame();
 
-  // Sit 3 players: A(Seat 0), B(Seat 1), C(Seat 2)
-  lobby.sitPlayer("pA", "Player A", 0);
-  lobby.sitPlayer("pB", "Player B", 1);
-  lobby.sitPlayer("pC", "Player C", 2);
+  lobby.join("pA", "Player A");
+  lobby.join("pB", "Player B");
+  lobby.join("pC", "Player C");
 
-  // Force Button to Seat 0 (A). startHand() advances by 1, so set to -1.
-  // Therefore Button=A(0), SB=B(1), BB=C(2)
+  // Buy in with different amounts to test side pots
+  lobby.sitPlayer("pA", 0, 100);  // Short stack
+  lobby.sitPlayer("pB", 1, 300);  // Medium stack
+  lobby.sitPlayer("pC", 2, 1000); // Big stack
+
   lobby.setButtonPos(-1);
 
-  // set stacks
-  // A: 100 (Short), B: 300 (Medium), C: 1000 (Big)
-  lobby.setPlayerStack(0, 100);
-  lobby.setPlayerStack(1, 300);
-  lobby.setPlayerStack(2, 1000);
-
-  g.startHand();
-  // After blinds: B posts SB(10) --> 290, C posts BB(20) --> 980, A has 100
-  // Pot = 30, currentBet = 20
+  // pA is host (first to join)
+  assert(lobby.startGame("pA") == true);
 
   assert(g.playerAction("pA", "allin", 0) == true);
   assert(g.playerAction("pB", "allin", 0) == true);
   assert(g.playerAction("pC", "call", 0) == true);
 
-  // pot was distributed
   assert(g.getPot() == 0);
 
-  // conservation of chips
   int totalChips = 0;
   for (const auto &p : g.getSeats())
     totalChips += p.chips;
@@ -104,7 +110,6 @@ void testSidePots() {
 
   log("Side Pot Logic Conservation of Mass Passed.");
 
-  // all-in showdown: all players must show
   assert(g.getIsAllInShowdown() == true);
   assert(g.getStage() == GameStage::Showdown);
 
@@ -116,8 +121,6 @@ void testSidePots() {
     assert(g.getSeats()[r.seatIndex].showCards == true);
   }
 
-  // Winners can't muck (already mustShow)
-  // Losers can't muck either (all-in showdown)
   assert(g.playerMuckOrShow("pA", false) == false);
   assert(g.playerMuckOrShow("pB", false) == false);
   assert(g.playerMuckOrShow("pC", false) == false);
@@ -135,33 +138,29 @@ void testFoldWin() {
   Lobby lobby(conf);
   Game &g = lobby.getGame();
 
-  lobby.sitPlayer("p1", "Alice", 0);
-  lobby.sitPlayer("p2", "Bob", 1);
-  lobby.setButtonPos(-1);
-  g.startHand();
+  lobby.join("p1", "Alice");
+  lobby.join("p2", "Bob");
 
-  // Button (Alice) folds. Bob wins without showdown.
+  lobby.sitPlayer("p1", 0, 1000);
+  lobby.sitPlayer("p2", 1, 1000);
+
+  lobby.setButtonPos(-1);
+  assert(lobby.startGame("p1") == true);
+
   assert(g.playerAction("p1", "fold", 0) == true);
 
-  // Not a showdown — winner doesn't have to show
   assert(g.getPot() == 0);
+  assert(g.getSeats()[0].showCards == false);
+  assert(g.getSeats()[1].showCards == false);
 
-  // Neither player should show cards by default (no showdown)
-  assert(g.getSeats()[0].showCards == false); // Alice folded
-  assert(g.getSeats()[1].showCards == false); // Bob won via fold, starts hidden
-
-  // showdownResults should be empty (no showdown)
   assert(g.getShowdownResults().empty());
 
-  // But Bob (fold-winner) can CHOOSE to show!
   assert(g.playerMuckOrShow("p2", true) == true);
   assert(g.getSeats()[1].showCards == true);
 
-  // Bob can also re-muck
   assert(g.playerMuckOrShow("p2", false) == true);
   assert(g.getSeats()[1].showCards == false);
 
-  // Alice (who folded) cannot show
   assert(g.playerMuckOrShow("p1", true) == false);
 
   log("Fold Win Test Passed.");
@@ -177,31 +176,31 @@ void testMuckOrShow() {
   Lobby lobby(conf);
   Game &g = lobby.getGame();
 
-  lobby.sitPlayer("p1", "Alice", 0);
-  lobby.sitPlayer("p2", "Bob", 1);
-  lobby.sitPlayer("p3", "Charlie", 2);
-  lobby.setButtonPos(-1);
-  g.startHand();
+  lobby.join("p1", "Alice");
+  lobby.join("p2", "Bob");
+  lobby.join("p3", "Charlie");
 
-  // Play to showdown normally (Button=Alice, SB=Bob, BB=Charlie)
+  lobby.sitPlayer("p1", 0, 1000);
+  lobby.sitPlayer("p2", 1, 1000);
+  lobby.sitPlayer("p3", 2, 1000);
+
+  lobby.setButtonPos(-1);
+  assert(lobby.startGame("p1") == true);
+
   assert(g.playerAction("p1", "call", 0) == true);
   assert(g.playerAction("p2", "call", 0) == true);
   assert(g.playerAction("p3", "check", 0) == true);
 
-  // Post-Flop: 3 streets of checks to reach showdown
   for (int street = 0; street < 3; street++) {
-    // Post-flop order: left of button = Bob(1), then Charlie(2), then Alice(0)
     assert(g.playerAction("p2", "check", 0) == true);
     assert(g.playerAction("p3", "check", 0) == true);
     assert(g.playerAction("p1", "check", 0) == true);
   }
 
-  // Should be at showdown now
   assert(g.getStage() == GameStage::Showdown);
   assert(g.getPot() == 0);
-  assert(g.getIsAllInShowdown() == false); // Normal showdown, not all-in
+  assert(g.getIsAllInShowdown() == false);
 
-  // Find who won and who lost
   const auto &results = g.getShowdownResults();
   assert(results.size() == 3);
 
@@ -215,27 +214,22 @@ void testMuckOrShow() {
     }
   }
 
-  // Winner must show, loser doesn't have to
   assert(winnerSeat >= 0);
   assert(g.getSeats()[winnerSeat].showCards == true);
 
   if (loserSeat >= 0) {
-    // Loser starts with cards hidden
     assert(g.getSeats()[loserSeat].showCards == false);
 
-    // Loser can choose to show
     std::string loserId = g.getSeats()[loserSeat].id;
     assert(g.playerMuckOrShow(loserId, true) == true);
     assert(g.getSeats()[loserSeat].showCards == true);
 
-    // Loser can muck again
     assert(g.playerMuckOrShow(loserId, false) == true);
     assert(g.getSeats()[loserSeat].showCards == false);
 
-    // Winner can't muck
     std::string winnerId = g.getSeats()[winnerSeat].id;
     assert(g.playerMuckOrShow(winnerId, false) == false);
-    assert(g.getSeats()[winnerSeat].showCards == true); // Still showing
+    assert(g.getSeats()[winnerSeat].showCards == true);
   }
 
   log("Muck/Show Test Passed.");

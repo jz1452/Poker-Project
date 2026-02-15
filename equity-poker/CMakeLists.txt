@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 1. Main Executable (Phase 1)
 add_executable(poker_eval 
-    src/main.cpp 
+    main.cpp 
     src/poker/Card.cpp 
     src/poker/Deck.cpp
     src/poker/Evaluator.cpp
@@ -37,3 +37,15 @@ add_executable(test_game
     src/poker/EvaluatorConstants.cpp
 )
 target_include_directories(test_game PRIVATE src/server src/poker)
+
+# 4. Test Executable (Phase 3 - Lobby Logic)
+add_executable(test_lobby 
+    tests/TestLobby.cpp 
+    src/server/Game.cpp 
+    src/server/Lobby.cpp
+    src/poker/Card.cpp 
+    src/poker/Deck.cpp
+    src/poker/Evaluator.cpp
+    src/poker/EvaluatorConstants.cpp
+)
+target_include_directories(test_lobby PRIVATE src/server src/poker)

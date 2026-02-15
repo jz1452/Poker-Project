@@ -58,6 +58,7 @@ public:
     return showdownResults;
   }
   bool getIsAllInShowdown() const { return isAllInShowdown; }
+  int getFoldWinner() const { return foldWinner; }
 
 private:
   Config config;
@@ -68,7 +69,7 @@ private:
   std::mt19937 rng;
 
   int pot = 0;
-  int buttonPos = 0;
+  int buttonPos = -1;
   int currentActor = 0;
   int sbPos = -1;
   int bbPos = -1;
