@@ -27,9 +27,23 @@ cmake-build-release/
 .DS_Store
 Thumbs.db
 
+# CMake Artifacts
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+*.cbp
+
+# Compiled Executables
+test_game
+poker_eval
+test_equity
+compile_commands.json
+
 # Project Specific
 tests/test_results.txt
 *.log
 IMPLEMENTATION_PLAN.md
 GAME_SERVER_PLAN.md
-compile_commands.json
+
