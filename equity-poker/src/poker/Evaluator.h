@@ -5,7 +5,7 @@
 
 namespace poker {
 
-// Hand Evaluator using Paul Senzee's perfect hash method
+// Hand Evaluator using Perfect Hash Function
 // Super fast O(1) lookup
 class Evaluator {
 public:

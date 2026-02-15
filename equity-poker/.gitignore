@@ -31,4 +31,5 @@ Thumbs.db
 tests/test_results.txt
 *.log
 IMPLEMENTATION_PLAN.md
+GAME_SERVER_PLAN.md
 compile_commands.json
