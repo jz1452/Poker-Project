@@ -1,0 +1,5 @@
+/Users/jordanzeng/Desktop/myProject/equity-poker/CMakeFiles/poker_eval.dir
+/Users/jordanzeng/Desktop/myProject/equity-poker/CMakeFiles/test_equity.dir
+/Users/jordanzeng/Desktop/myProject/equity-poker/CMakeFiles/test_game.dir
+/Users/jordanzeng/Desktop/myProject/equity-poker/CMakeFiles/edit_cache.dir
+/Users/jordanzeng/Desktop/myProject/equity-poker/CMakeFiles/rebuild_cache.dir

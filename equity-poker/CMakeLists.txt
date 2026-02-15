@@ -1,25 +1,39 @@
-cmake_minimum_required(VERSION 3.20)
-project(EquityPoker VERSION 0.1.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.10)
+project(EquityPoker)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-add_compile_options(-Wall -Wextra -Wpedantic)
 
-# Sources (The Core Library)
-# We exclude main.cpp from here so multiple targets can link against it
-file(GLOB_RECURSE POKER_LIB_SOURCES 
-    "src/poker/*.cpp"
-    "src/engine/*.cpp"
+# 1. Main Executable (Phase 1)
+add_executable(poker_eval 
+    src/main.cpp 
+    src/poker/Card.cpp 
+    src/poker/Deck.cpp
+    src/poker/Evaluator.cpp
+    src/poker/EvaluatorConstants.cpp
+    src/poker/EquityCalculator.cpp
 )
+target_include_directories(poker_eval PRIVATE src/poker)
 
-# Target 1: The Main Game Server (Phase 3)
-add_executable(poker_sim main.cpp ${POKER_LIB_SOURCES})
-target_include_directories(poker_sim PRIVATE ${CMAKE_SOURCE_DIR})
+# 2. Test Executable (Phase 2 - Equity)
+add_executable(test_equity 
+    tests/TestEquity.cpp 
+    src/poker/Card.cpp 
+    src/poker/Deck.cpp
+    src/poker/Evaluator.cpp
+    src/poker/EvaluatorConstants.cpp
+    src/poker/EquityCalculator.cpp
+)
+target_include_directories(test_equity PRIVATE src/poker)
 
-# Target 2: The Deck Test (Phase 1)
-add_executable(test_deck tests/TestDeck.cpp ${POKER_LIB_SOURCES})
-target_include_directories(test_deck PRIVATE ${CMAKE_SOURCE_DIR})
-
-# Target 3: The Equity Test (Phase 2)
-add_executable(test_equity tests/TestEquity.cpp ${POKER_LIB_SOURCES})
-target_include_directories(test_equity PRIVATE ${CMAKE_SOURCE_DIR})
+# 3. Test Executable (Phase 3 - Game Logic)
+add_executable(test_game 
+    tests/TestGame.cpp 
+    src/server/Game.cpp 
+    src/server/Lobby.cpp
+    src/poker/Card.cpp 
+    src/poker/Deck.cpp
+    src/poker/Evaluator.cpp
+    src/poker/EvaluatorConstants.cpp
+)
+target_include_directories(test_game PRIVATE src/server src/poker)

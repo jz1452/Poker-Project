@@ -5,34 +5,28 @@
 
 namespace poker {
 
-enum class PlayerStatus {
-  SittingOut,
-  Waiting, // Joined, but waiting for next hand
-  Active,  // In the hand
-  Folded,
-  AllIn
-};
+enum class PlayerStatus { SittingOut, Waiting, Active, Folded, AllIn };
 
 struct Player {
-  std::string id;   // Unique ID (WebSocket UUID)
-  std::string name; // Display Name
+  std::string id;
+  std::string name;
 
-  int chips = 0;      // Total stack
-  int currentBet = 0; // Bet in the CURRENT betting round (for resolving pulls)
-  int totalBet = 0;   // Total bet in the entire hand (for Side Pots)
+  int chips = 0;
+  int currentBet = 0; // Bet in current betting round
+  int totalBet = 0;   // Total bet across the entire hand (for side pots)
 
   PlayerStatus status = PlayerStatus::Waiting;
-  std::vector<Card> hand; // 2 Hole Cards
+  std::vector<Card> hand;
 
-  // For disconnection handling
+  bool showCards = false;
   bool isConnected = true;
 
-  // Resets state for a new hand
   void resetHand() {
     status = (chips > 0) ? PlayerStatus::Active : PlayerStatus::SittingOut;
     currentBet = 0;
     totalBet = 0;
     hand.clear();
+    showCards = false;
   }
 };
 

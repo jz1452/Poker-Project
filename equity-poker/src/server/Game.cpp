@@ -4,40 +4,6 @@
 
 namespace poker {
 
-// --- Lobby Actions ---
-
-int Game::sitPlayer(std::string id, std::string name, int seatIndex) {
-  if (seatIndex < 0 || seatIndex >= config.maxSeats)
-    return -1;
-  // Check if seat is already taken
-  if (seats[seatIndex].status != PlayerStatus::SittingOut &&
-      !seats[seatIndex].id.empty()) {
-    return -1;
-  }
-
-  seats[seatIndex].id = id;
-  seats[seatIndex].name = name;
-  seats[seatIndex].chips = config.startingStack;
-  seats[seatIndex].status = PlayerStatus::Waiting; // Wait for next hand
-
-  return seatIndex;
-}
-
-bool Game::standPlayer(std::string id) {
-  for (auto &p : seats) {
-    if (p.id == id) {
-      // Reset player to default state
-      p = Player();
-      p.status = PlayerStatus::SittingOut;
-      p.id = "";
-      return true;
-    }
-  }
-  return false;
-}
-
-// --- Game Flow ---
-
 void Game::startHand() {
   int activeCount = 0;
   for (const auto &p : seats) {
@@ -47,15 +13,18 @@ void Game::startHand() {
   if (activeCount < 2)
     return;
 
-  // 1. Reset State
+  // Reset state
   pot = 0;
   currentBet = 0;
   board.clear();
   sidePots.clear();
+  showdownResults.clear();
+  isAllInShowdown = false;
+  foldWinner = -1;
   deck = Deck();
   deck.shuffle(rng);
 
-  // 2. Move Button
+  // Move button to next eligible player
   int attempts = 0;
   do {
     buttonPos = (buttonPos + 1) % config.maxSeats;
@@ -64,14 +33,12 @@ void Game::startHand() {
             seats[buttonPos].chips == 0) &&
            attempts < config.maxSeats * 2);
 
-  // 3. Mark Players Active & Reset Hands
   for (auto &p : seats) {
-    if (p.status != PlayerStatus::SittingOut) {
+    if (p.status != PlayerStatus::SittingOut)
       p.resetHand();
-    }
   }
 
-  // 4. Post Blinds
+  // Heads-up: button is SB. Otherwise SB is left of button.
   if (activeCount == 2) {
     sbPos = buttonPos;
     bbPos = nextActivePlayer(sbPos);
@@ -80,14 +47,12 @@ void Game::startHand() {
     bbPos = nextActivePlayer(sbPos);
   }
 
-  // Post SB
   int sbAmount = std::min(config.smallBlind, seats[sbPos].chips);
   seats[sbPos].chips -= sbAmount;
   seats[sbPos].currentBet = sbAmount;
   seats[sbPos].totalBet = sbAmount;
   pot += sbAmount;
 
-  // Post BB
   int bbAmount = std::min(config.bigBlind, seats[bbPos].chips);
   seats[bbPos].chips -= bbAmount;
   seats[bbPos].currentBet = bbAmount;
@@ -97,7 +62,7 @@ void Game::startHand() {
   currentBet = config.bigBlind;
   minRaise = config.bigBlind;
 
-  // 5. Deal Cards
+  // Deal 2 cards to each player, starting left of button
   for (int i = 0; i < 2; i++) {
     int dealIdx = nextActivePlayer(buttonPos);
     for (int j = 0; j < activeCount; j++) {
@@ -106,7 +71,7 @@ void Game::startHand() {
     }
   }
 
-  // 6. Set Actor
+  // Heads-up: SB acts first pre-flop. Otherwise left of BB.
   if (activeCount == 2) {
     currentActor = sbPos;
   } else {
@@ -117,7 +82,7 @@ void Game::startHand() {
   stage = GameStage::PreFlop;
 }
 
-// Find next seated, non-folded player
+// Next player who hasn't folded (includes All-In)
 int Game::nextActivePlayer(int current) {
   int idx = current;
   for (int i = 0; i < config.maxSeats; i++) {
@@ -130,7 +95,7 @@ int Game::nextActivePlayer(int current) {
   return current;
 }
 
-// Only return players who have chips (Active)
+// Next player who can still bet (Active only, skips All-In)
 int Game::nextBettingPlayer(int current) {
   int idx = current;
   for (int i = 0; i < config.maxSeats; i++) {
@@ -155,25 +120,28 @@ bool Game::playerAction(std::string id, std::string action, int amount) {
   if (stage == GameStage::Showdown)
     return false;
 
-  // 1. Validate Turn
   Player &p = seats[currentActor];
   if (p.id != id)
     return false;
-  // 2. Validate Actions
+
   if (action == "fold") {
     p.status = PlayerStatus::Folded;
-    // Check for immediate win
     if (activePlayerCount() == 1) {
+      // Record fold-winner so they can optionally show
+      for (int i = 0; i < config.maxSeats; i++) {
+        if (seats[i].status == PlayerStatus::Active ||
+            seats[i].status == PlayerStatus::AllIn) {
+          foldWinner = i;
+          break;
+        }
+      }
       distributePot();
-      startHand();
       return true;
     }
   } else if (action == "call") {
     int callCost = currentBet - p.currentBet;
-    if (callCost >= p.chips) {
-      // Auto-convert to All-In
-      return playerAction(id, "allin", 0);
-    }
+    if (callCost >= p.chips)
+      return playerAction(id, "allin", 0); // Auto all-in
 
     p.chips -= callCost;
     p.currentBet += callCost;
@@ -183,47 +151,39 @@ bool Game::playerAction(std::string id, std::string action, int amount) {
     if (currentBet > p.currentBet)
       return false;
   } else if (action == "raise") {
-    // Amount is the TOTAL bet (e.g. "Raise to 200")
-    int raiseAmount = amount;
-    int toAdd = raiseAmount - p.currentBet;
+    // amount is the TOTAL bet (e.g. "raise to 200")
+    int toAdd = amount - p.currentBet;
 
-    // Must normally be >= minRaise + currentBet
     if (toAdd > p.chips)
       return false;
-    if (raiseAmount < currentBet + minRaise)
+    if (amount < currentBet + minRaise)
       return false;
+
     p.chips -= toAdd;
     p.currentBet += toAdd;
     p.totalBet += toAdd;
     pot += toAdd;
 
-    // Update Game State
-    int raiseDiff = raiseAmount - currentBet;
-    currentBet = raiseAmount;
-    minRaise = raiseDiff;         // Min raise rule
-    lastAggressor = currentActor; // Action re-opens for everyone
+    int raiseDiff = amount - currentBet;
+    currentBet = amount;
+    minRaise = raiseDiff;
+    lastAggressor = currentActor;
   } else if (action == "allin") {
     int allInAmount = p.chips;
     p.chips = 0;
-
     p.currentBet += allInAmount;
     p.totalBet += allInAmount;
     pot += allInAmount;
     p.status = PlayerStatus::AllIn;
 
-    // Strict Re-Open
     if (p.currentBet > currentBet) {
       int raiseSize = p.currentBet - currentBet;
-
-      // Does this All-In reopen the betting?
+      // Only reopen betting if it's a full raise
       if (raiseSize >= minRaise) {
-        // Yes, it's a full raise
         minRaise = raiseSize;
         lastAggressor = currentActor;
       }
-      // No, it's a short-stack shove.
-      // Action does NOT reopen for those who already acted.
-      // dont update lastAggressor.
+      // Short shove: doesn't reopen, don't update lastAggressor
       currentBet = p.currentBet;
     }
   } else {
@@ -238,53 +198,48 @@ void Game::nextTurn() {
   int next = nextBettingPlayer(currentActor);
   bool roundEnds = false;
 
-  // Rule 1: We completed a full orbit (Next player is Last Aggressor)
-  if (next == lastAggressor) {
+  // Full orbit complete or no other bettor remains
+  if (next == lastAggressor || next == currentActor) {
     roundEnds = true;
-
-    // Exception: Pre-Flop, if nobody raised, the Big Blind gets an option to
-    // raise
+    // Exception: BB option pre-flop (hasn't acted yet)
     if (stage == GameStage::PreFlop && next == bbPos &&
-        currentBet == config.bigBlind) {
+        currentBet == config.bigBlind && next != currentActor) {
       roundEnds = false;
     }
   }
 
-  // Rule 2: The Big Blind checked their Option (Pre-Flop only)
+  // BB checked their option
   if (stage == GameStage::PreFlop && currentActor == bbPos &&
       currentActor == lastAggressor) {
-    // If they checked, next street
-    if (seats[currentActor].currentBet == currentBet) {
+    if (seats[currentActor].currentBet == currentBet)
       roundEnds = true;
-    }
   }
 
   if (roundEnds) {
+    if (stage == GameStage::Showdown)
+      return;
     nextStreet();
+    // Auto-walk remaining streets if < 2 players can bet (all-in scenario)
+    if (stage != GameStage::Showdown) {
+      int bettingPlayers = 0;
+      for (auto &p : seats)
+        if (p.status == PlayerStatus::Active)
+          bettingPlayers++;
+      if (bettingPlayers < 2 && activePlayerCount() > 1) {
+        while (stage != GameStage::Showdown)
+          nextStreet();
+      }
+    }
     return;
   }
 
   currentActor = next;
-
-  // Check for "Auto-Walk" (Everyone else All-In/Folded)
-  // If only 1 person has chips left to bet, run the rest of the board
-  if (activePlayerCount() > 1) {
-    int bettingPlayers = 0;
-    for (auto &p : seats)
-      if (p.status == PlayerStatus::Active)
-        bettingPlayers++;
-    if (bettingPlayers < 2) {
-      while (stage != GameStage::Showdown)
-        nextStreet();
-    }
-  }
 }
 
 void Game::nextStreet() {
-  // 1. Reset betting
   currentBet = 0;
   minRaise = config.bigBlind;
-  lastAggressor = -1; // Reset aggressor
+  lastAggressor = -1;
 
   for (auto &p : seats) {
     if (p.status != PlayerStatus::Folded &&
@@ -292,7 +247,7 @@ void Game::nextStreet() {
       p.currentBet = 0;
     }
   }
-  // 2. Advance Stage
+
   if (stage == GameStage::PreFlop) {
     stage = GameStage::Flop;
   } else if (stage == GameStage::Flop) {
@@ -302,10 +257,10 @@ void Game::nextStreet() {
   } else if (stage == GameStage::River) {
     stage = GameStage::Showdown;
     distributePot();
-    startHand();
     return;
   }
-  // 3. Deal Cards
+
+  // Deal community cards (3 on flop, 1 on turn/river)
   int cardsToDeal = (stage == GameStage::Flop) ? 3 : 1;
   if (!deck.getCards().empty())
     deck.deal(); // Burn
@@ -314,7 +269,7 @@ void Game::nextStreet() {
       board.push_back(deck.deal());
   }
 
-  // 4. Set First Actor (Left of Button)
+  // Post-flop action starts left of button
   currentActor = nextBettingPlayer(buttonPos);
   lastAggressor = currentActor;
 }
@@ -322,7 +277,7 @@ void Game::nextStreet() {
 void Game::resolveSidePots() {
   sidePots.clear();
 
-  // 1. Identify distinct bet levels (from shortest stack to largest)
+  // Collect distinct bet levels
   std::vector<int> levels;
   for (const auto &p : seats) {
     if (p.totalBet > 0)
@@ -331,7 +286,7 @@ void Game::resolveSidePots() {
   std::sort(levels.begin(), levels.end());
   levels.erase(std::unique(levels.begin(), levels.end()), levels.end());
 
-  // 2. Build Pots for each level
+  // Build a pot for each level
   int previousLevel = 0;
   for (int level : levels) {
     int contribution = level - previousLevel;
@@ -340,17 +295,13 @@ void Game::resolveSidePots() {
 
     for (int i = 0; i < config.maxSeats; i++) {
       if (seats[i].totalBet >= level) {
-        // Full contribution for this level
         sp.amount += contribution;
-        // Eligible to win if they haven't folded
         if (seats[i].status != PlayerStatus::Folded &&
             seats[i].status != PlayerStatus::SittingOut) {
           sp.eligiblePlayers.push_back(seats[i].id);
         }
       } else if (seats[i].totalBet > previousLevel) {
-        // Partial contribution (All-In for less)
         sp.amount += (seats[i].totalBet - previousLevel);
-        // NOT eligible for this level
       }
     }
 
@@ -361,17 +312,26 @@ void Game::resolveSidePots() {
 }
 
 void Game::distributePot() {
-  // 1. Calculate the pots structure
   resolveSidePots();
 
   Evaluator eval;
+  showdownResults.clear();
 
-  // 2. Process each pot (Main Pot is just the first one)
+  // Detect all-in showdown (< 2 Active players = everyone was all-in)
+  int activeBettors = 0;
+  for (const auto &p : seats) {
+    if (p.status == PlayerStatus::Active)
+      activeBettors++;
+  }
+  isAllInShowdown = (activeBettors < 2);
+
+  std::vector<int> chipsWonPerSeat(config.maxSeats, 0);
+
   for (const auto &sp : sidePots) {
     if (sp.eligiblePlayers.empty())
       continue;
 
-    // Convert IDs back to seat indices
+    // Map player IDs back to seat indices
     std::vector<int> eligibleIdx;
     for (const std::string &id : sp.eligiblePlayers) {
       for (int i = 0; i < config.maxSeats; i++) {
@@ -382,12 +342,11 @@ void Game::distributePot() {
       }
     }
 
-    // 3. Find Winner for current pot
+    // Find best hand(s)
     int bestScore = 99999;
     std::vector<int> winners;
 
     if (eligibleIdx.size() == 1) {
-      // Optimization: Auto-win if only 1 player (everyone else folded)
       winners.push_back(eligibleIdx[0]);
     } else {
       for (int idx : eligibleIdx) {
@@ -395,9 +354,8 @@ void Game::distributePot() {
         sevenCards.insert(sevenCards.end(), board.begin(), board.end());
 
         int score = 99999;
-        if (sevenCards.size() >= 5) {
+        if (sevenCards.size() >= 5)
           score = eval.evaluate(sevenCards);
-        }
 
         if (score < bestScore) {
           bestScore = score;
@@ -409,7 +367,6 @@ void Game::distributePot() {
       }
     }
 
-    // 4. Distribute Chips
     if (winners.empty())
       continue;
     int share = sp.amount / winners.size();
@@ -417,9 +374,10 @@ void Game::distributePot() {
 
     for (int w : winners) {
       seats[w].chips += share;
+      chipsWonPerSeat[w] += share;
     }
 
-    // Odd Chip
+    // Odd chip goes to first winner left of button
     if (remainder > 0) {
       int current = buttonPos;
       while (remainder > 0) {
@@ -427,6 +385,7 @@ void Game::distributePot() {
         for (int w : winners) {
           if (w == current) {
             seats[w].chips += 1;
+            chipsWonPerSeat[w] += 1;
             remainder--;
             break;
           }
@@ -435,7 +394,59 @@ void Game::distributePot() {
     }
   }
 
+  // Build showdown results (skip for fold-wins)
+  if (stage == GameStage::Showdown) {
+    for (int i = 0; i < config.maxSeats; i++) {
+      if (seats[i].status == PlayerStatus::Folded ||
+          seats[i].status == PlayerStatus::SittingOut ||
+          seats[i].status == PlayerStatus::Waiting)
+        continue;
+
+      ShowdownResult result;
+      result.seatIndex = i;
+      result.chipsWon = chipsWonPerSeat[i];
+
+      std::vector<Card> sevenCards = seats[i].hand;
+      sevenCards.insert(sevenCards.end(), board.begin(), board.end());
+      if (sevenCards.size() >= 5)
+        result.handRank = eval.evaluate(sevenCards);
+
+      result.mustShow = (chipsWonPerSeat[i] > 0) || isAllInShowdown;
+      seats[i].showCards = result.mustShow;
+
+      showdownResults.push_back(result);
+    }
+  }
+
   pot = 0;
+}
+
+bool Game::playerMuckOrShow(std::string id, bool show) {
+  if (stage != GameStage::Showdown && foldWinner == -1)
+    return false;
+
+  for (int i = 0; i < config.maxSeats; i++) {
+    if (seats[i].id == id) {
+      // Fold-winner can freely toggle
+      if (foldWinner == i) {
+        seats[i].showCards = show;
+        return true;
+      }
+
+      // Outside showdown, only fold-winner is allowed
+      if (stage != GameStage::Showdown)
+        return false;
+
+      // Can't muck if forced to show (winner or all-in)
+      for (const auto &r : showdownResults) {
+        if (r.seatIndex == i && r.mustShow)
+          return false;
+      }
+      seats[i].showCards = show;
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace poker
