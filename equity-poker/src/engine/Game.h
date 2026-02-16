@@ -18,10 +18,11 @@ struct ShowdownResult {
   int seatIndex = -1;
   int handRank = 99999; // Lower is better
   int chipsWon = 0;
-  bool mustShow = false; // True for winners and all-in players
+  bool mustShow = false;   // True for winners and all-in players
+  bool hasDecided = false; // True once player has made their muck/show choice
 };
 
-enum class GameStage { PreFlop, Flop, Turn, River, Showdown };
+enum class GameStage { Idle, PreFlop, Flop, Turn, River, Showdown };
 
 class Game {
   friend class Lobby;
@@ -30,7 +31,7 @@ public:
   struct Config {
     int smallBlind = 5;
     int bigBlind = 10;
-    int maxSeats = 9;
+    int maxSeats = 6;
     int startingStack = 1000;
     Config() {}
   };
@@ -54,11 +55,14 @@ public:
   int getButtonPos() const { return buttonPos; }
   int getCurrentBet() const { return currentBet; }
   int getMinRaise() const { return minRaise; }
+  int findSeatIndex(const std::string &id) const;
   const std::vector<ShowdownResult> &getShowdownResults() const {
     return showdownResults;
   }
   bool getIsAllInShowdown() const { return isAllInShowdown; }
   int getFoldWinner() const { return foldWinner; }
+
+  friend void to_json(nlohmann::json &j, const Game &g);
 
 private:
   Config config;
@@ -78,7 +82,7 @@ private:
   int currentBet = 0;
   int lastAggressor = -1;
 
-  GameStage stage = GameStage::PreFlop;
+  GameStage stage = GameStage::Idle;
 
   std::vector<ShowdownResult> showdownResults;
   bool isAllInShowdown = false;
@@ -88,6 +92,7 @@ private:
   void nextStreet();
   void resolveSidePots();
   void distributePot();
+  void checkShowdownResolved(); // Auto-transition Showdown → Idle
   int nextActivePlayer(int current);
   int nextBettingPlayer(int current);
   int activePlayerCount() const;

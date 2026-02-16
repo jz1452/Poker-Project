@@ -11,6 +11,7 @@ namespace poker {
 
 using namespace std;
 
+// Helper to run a chunk of simulations
 static vector<double> runSimulations(int iterations,
                                      const vector<vector<Card>> &hands,
                                      const vector<Card> &board,
@@ -19,12 +20,14 @@ static vector<double> runSimulations(int iterations,
   int numPlayers = hands.size();
   vector<double> wins(numPlayers, 0.0);
 
+  // Local RNG for this thread
   random_device rd;
   mt19937 rng(rd());
 
   // Local copy of deck to shuffle
   vector<Card> currentDeck = deck;
 
+  // Buffers for 7 cards per player
   vector<vector<Card>> playerHandCards(numPlayers);
   for (int i = 0; i < numPlayers; i++) {
     playerHandCards[i].reserve(7);
@@ -32,16 +35,18 @@ static vector<double> runSimulations(int iterations,
 
   // Simulation Loop
   for (int i = 0; i < iterations; i++) {
+    // 1. Shuffle remaining deck
     shuffle(currentDeck.begin(), currentDeck.end(), rng);
 
+    // 2. Deal missing board cards
     int cardsNeeded = 5 - board.size();
 
+    // 3. Evaluate each player
     int bestRank = 9999;
     vector<int> playerRanks(numPlayers);
 
-    // Evaluate each player
     for (int p = 0; p < numPlayers; p++) {
-      // Constructing a full hand: 2 cards + board
+      // Construct full hand: Hole Cards + Board + Dealt Board
       playerHandCards[p] = hands[p];
       playerHandCards[p].insert(playerHandCards[p].end(), board.begin(),
                                 board.end());
@@ -56,14 +61,13 @@ static vector<double> runSimulations(int iterations,
         bestRank = playerRanks[p];
     }
 
-    // Award wins (accounts for split pots as well)
+    // 4. Award wins (handle splits/ties)
     int winners = 0;
     for (int r : playerRanks) {
       if (r == bestRank)
         winners++;
     }
 
-    // Split pots have a percentage winShare
     double winShare = 1.0 / winners;
     for (int p = 0; p < numPlayers; p++) {
       if (playerRanks[p] == bestRank) {
@@ -81,6 +85,9 @@ EquityCalculator::calculateEquity(const vector<vector<Card>> &hands,
 
   // 1. Create the "Remaining Deck"
   // Start with full deck, remove all hole cards and board cards
+  // 1. Create the "Remaining Deck"
+  // Optimisation: Use a boolean array to mark used cards (Rank * 4 + Suit)
+  // 13 ranks * 4 suits = 52 cards
   bool usedCards[52] = {false};
 
   for (const auto &hand : hands) {
@@ -97,6 +104,7 @@ EquityCalculator::calculateEquity(const vector<vector<Card>> &hands,
   }
 
   // Rebuild the deck
+  Deck fullDeck;
   std::vector<Card> remainingDeck;
   remainingDeck.reserve(52 - (hands.size() * 2 + board.size()));
 
@@ -109,8 +117,8 @@ EquityCalculator::calculateEquity(const vector<vector<Card>> &hands,
     }
   }
 
-  // 2. Multithreading Setup --> 100k sims
-  int totalIterations = 100000;
+  // 2. Multithreading Setup
+  int totalIterations = 100000; // 100k sims
   int numThreads = thread::hardware_concurrency();
   if (numThreads == 0)
     numThreads = 4;
@@ -119,7 +127,7 @@ EquityCalculator::calculateEquity(const vector<vector<Card>> &hands,
 
   vector<future<vector<double>>> futures;
 
-  // 3. use Threads
+  // 3. Launch Threads
   for (int i = 0; i < numThreads; i++) {
     futures.push_back(async(launch::async, runSimulations, simsPerThread, hands,
                             board, remainingDeck));
@@ -134,6 +142,7 @@ EquityCalculator::calculateEquity(const vector<vector<Card>> &hands,
     }
   }
 
+  // 5. Convert to Percentage (0.0 - 1.0)
   vector<double> equities;
   for (double w : totalWins) {
     equities.push_back(w / totalIterations);

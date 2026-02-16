@@ -1,7 +1,9 @@
 #pragma once
 
 #include "Card.h"
+#include <iostream>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace poker {

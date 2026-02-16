@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <nlohmann/json_fwd.hpp>
 #include <string>
 #include <vector>
 
@@ -59,5 +60,8 @@ struct Card {
 
 // Stream operator for easy printing
 std::ostream &operator<<(std::ostream &os, const Card &c);
+
+// JSON Serialization
+void to_json(nlohmann::json &j, const Card &c);
 
 } // namespace poker

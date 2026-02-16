@@ -1,7 +1,14 @@
 #include "Card.h"
+#include <iostream>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 
 namespace poker {
+
+void to_json(nlohmann::json &j, const Card &c) {
+  j = nlohmann::json{
+      {"rank", c.rank()}, {"suit", c.suit()}, {"str", c.toString()}};
+}
 
 using namespace std;
 

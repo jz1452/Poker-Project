@@ -1,10 +1,19 @@
 #include "Game.h"
 #include "../poker/Evaluator.h"
 #include <iostream>
+#include <nlohmann/json.hpp>
 
 namespace poker {
 
 void Game::startHand() {
+  // Reset players first so that disconnected --> SittingOut, no chips -->
+  // SittingOut
+  for (auto &p : seats) {
+    if (p.status != PlayerStatus::SittingOut)
+      p.resetHand();
+  }
+
+  // Count active players AFTER reset (so disconnected players are excluded)
   int activeCount = 0;
   for (const auto &p : seats) {
     if (p.status != PlayerStatus::SittingOut && p.chips > 0)
@@ -13,7 +22,7 @@ void Game::startHand() {
   if (activeCount < 2)
     return;
 
-  // Reset state
+  // Reset game
   pot = 0;
   currentBet = 0;
   board.clear();
@@ -32,11 +41,6 @@ void Game::startHand() {
   } while ((seats[buttonPos].status == PlayerStatus::SittingOut ||
             seats[buttonPos].chips == 0) &&
            attempts < config.maxSeats * 2);
-
-  for (auto &p : seats) {
-    if (p.status != PlayerStatus::SittingOut)
-      p.resetHand();
-  }
 
   // Heads-up: button is SB. Otherwise SB is left of button.
   if (activeCount == 2) {
@@ -59,7 +63,7 @@ void Game::startHand() {
   seats[bbPos].totalBet = bbAmount;
   pot += bbAmount;
 
-  currentBet = config.bigBlind;
+  currentBet = bbAmount;
   minRaise = config.bigBlind;
 
   // Deal 2 cards to each player, starting left of button
@@ -117,7 +121,7 @@ int Game::activePlayerCount() const {
 }
 
 bool Game::playerAction(std::string id, std::string action, int amount) {
-  if (stage == GameStage::Showdown)
+  if (stage == GameStage::Showdown || stage == GameStage::Idle)
     return false;
 
   Player &p = seats[currentActor];
@@ -216,17 +220,17 @@ void Game::nextTurn() {
   }
 
   if (roundEnds) {
-    if (stage == GameStage::Showdown)
+    if (stage == GameStage::Showdown || stage == GameStage::Idle)
       return;
     nextStreet();
     // Auto-walk remaining streets if < 2 players can bet (all-in scenario)
-    if (stage != GameStage::Showdown) {
+    if (stage != GameStage::Showdown && stage != GameStage::Idle) {
       int bettingPlayers = 0;
       for (auto &p : seats)
         if (p.status == PlayerStatus::Active)
           bettingPlayers++;
       if (bettingPlayers < 2 && activePlayerCount() > 1) {
-        while (stage != GameStage::Showdown)
+        while (stage != GameStage::Showdown && stage != GameStage::Idle)
           nextStreet();
       }
     }
@@ -234,6 +238,14 @@ void Game::nextTurn() {
   }
 
   currentActor = next;
+
+  // If next actor is disconnected, auto-fold/check recursively
+  if (seats[currentActor].status == PlayerStatus::Active &&
+      !seats[currentActor].isConnected) {
+    if (!playerAction(seats[currentActor].id, "check")) {
+      playerAction(seats[currentActor].id, "fold");
+    }
+  }
 }
 
 void Game::nextStreet() {
@@ -272,6 +284,16 @@ void Game::nextStreet() {
   // Post-flop action starts left of button
   currentActor = nextBettingPlayer(buttonPos);
   lastAggressor = currentActor;
+
+  // If start-of-street actor is disconnected, auto-fold/check recursively
+  if (seats[currentActor].status == PlayerStatus::Active &&
+      !seats[currentActor].isConnected) {
+    if (currentBet == seats[currentActor].currentBet) {
+      playerAction(seats[currentActor].id, "check");
+    } else {
+      playerAction(seats[currentActor].id, "fold");
+    }
+  }
 }
 
 void Game::resolveSidePots() {
@@ -380,8 +402,8 @@ void Game::distributePot() {
     // Odd chip goes to first winner left of button
     if (remainder > 0) {
       int current = buttonPos;
-      while (remainder > 0) {
-        current = nextActivePlayer(current);
+      for (int i = 0; i < config.maxSeats && remainder > 0; i++) {
+        current = (current + 1) % config.maxSeats;
         for (int w : winners) {
           if (w == current) {
             seats[w].chips += 1;
@@ -412,10 +434,14 @@ void Game::distributePot() {
         result.handRank = eval.evaluate(sevenCards);
 
       result.mustShow = (chipsWonPerSeat[i] > 0) || isAllInShowdown;
+      result.hasDecided = result.mustShow; // Forced-show = already decided
       seats[i].showCards = result.mustShow;
 
       showdownResults.push_back(result);
     }
+
+    // If no one had a choice, auto-transition to Idle
+    checkShowdownResolved();
   }
 
   pot = 0;
@@ -430,6 +456,8 @@ bool Game::playerMuckOrShow(std::string id, bool show) {
       // Fold-winner can freely toggle
       if (foldWinner == i) {
         seats[i].showCards = show;
+        // Fold-winner decided → transition to Idle
+        stage = GameStage::Idle;
         return true;
       }
 
@@ -438,15 +466,91 @@ bool Game::playerMuckOrShow(std::string id, bool show) {
         return false;
 
       // Can't muck if forced to show (winner or all-in)
-      for (const auto &r : showdownResults) {
+      for (auto &r : showdownResults) {
         if (r.seatIndex == i && r.mustShow)
           return false;
       }
       seats[i].showCards = show;
+
+      // Mark this player's decision and check if all resolved
+      for (auto &r : showdownResults) {
+        if (r.seatIndex == i) {
+          r.hasDecided = true;
+          break;
+        }
+      }
+      checkShowdownResolved();
       return true;
     }
   }
   return false;
+}
+
+void Game::checkShowdownResolved() {
+  if (stage != GameStage::Showdown)
+    return;
+
+  for (const auto &r : showdownResults) {
+    if (!r.hasDecided)
+      return; // Someone still hasn't decided
+  }
+
+  // Everyone has decided → transition to Idle
+  stage = GameStage::Idle;
+}
+
+int Game::findSeatIndex(const std::string &id) const {
+  for (int i = 0; i < (int)seats.size(); i++) {
+    if (seats[i].id == id)
+      return i;
+  }
+  return -1;
+}
+
+// JSON Serialization Helpers
+NLOHMANN_JSON_SERIALIZE_ENUM(GameStage, {{GameStage::Idle, "Idle"},
+                                         {GameStage::PreFlop, "PreFlop"},
+                                         {GameStage::Flop, "Flop"},
+                                         {GameStage::Turn, "Turn"},
+                                         {GameStage::River, "River"},
+                                         {GameStage::Showdown, "Showdown"}})
+
+void to_json(nlohmann::json &j, const Game::Config &c) {
+  j = nlohmann::json{{"smallBlind", c.smallBlind},
+                     {"bigBlind", c.bigBlind},
+                     {"maxSeats", c.maxSeats},
+                     {"startingStack", c.startingStack}};
+}
+
+void to_json(nlohmann::json &j, const SidePot &p) {
+  j = nlohmann::json{{"amount", p.amount},
+                     {"eligiblePlayers", p.eligiblePlayers}};
+}
+
+void to_json(nlohmann::json &j, const ShowdownResult &r) {
+  j = nlohmann::json{{"seatIndex", r.seatIndex},
+                     {"handRank", r.handRank},
+                     {"chipsWon", r.chipsWon},
+                     {"mustShow", r.mustShow},
+                     {"hasDecided", r.hasDecided}};
+}
+
+void to_json(nlohmann::json &j, const Game &g) {
+  j = nlohmann::json{{"config", g.config},
+                     {"seats", g.seats},
+                     {"pot", g.pot},
+                     {"board", g.board},
+                     {"buttonPos", g.buttonPos},
+                     {"sbPos", g.sbPos},
+                     {"bbPos", g.bbPos},
+                     {"currentActor", g.currentActor},
+                     {"minRaise", g.minRaise},
+                     {"currentBet", g.currentBet},
+                     {"stage", g.stage},
+                     {"sidePots", g.sidePots},
+                     {"showdownResults", g.showdownResults},
+                     {"foldWinner", g.foldWinner},
+                     {"isAllInShowdown", g.isAllInShowdown}};
 }
 
 } // namespace poker

@@ -88,9 +88,9 @@ void testSidePots() {
   lobby.join("pC", "Player C");
 
   // Buy in with different amounts to test side pots
-  lobby.sitPlayer("pA", 0, 100);  // Short stack
-  lobby.sitPlayer("pB", 1, 300);  // Medium stack
-  lobby.sitPlayer("pC", 2, 1000); // Big stack
+  lobby.sitPlayer("pA", 0, 100); // Short stack
+  lobby.sitPlayer("pB", 1, 300);
+  lobby.sitPlayer("pC", 2, 1000);
 
   lobby.setButtonPos(-1);
 
@@ -110,8 +110,8 @@ void testSidePots() {
 
   log("Side Pot Logic Conservation of Mass Passed.");
 
-  assert(g.getIsAllInShowdown() == true);
-  assert(g.getStage() == GameStage::Showdown);
+  // All players must show → auto-resolved → Idle
+  assert(g.getStage() == GameStage::Idle);
 
   const auto &results = g.getShowdownResults();
   assert(results.size() == 3);
@@ -197,7 +197,7 @@ void testMuckOrShow() {
     assert(g.playerAction("p1", "check", 0) == true);
   }
 
-  assert(g.getStage() == GameStage::Showdown);
+  assert(g.getStage() == GameStage::Showdown); // Losers still have choices
   assert(g.getPot() == 0);
   assert(g.getIsAllInShowdown() == false);
 

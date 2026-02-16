@@ -1,5 +1,5 @@
 #pragma once
-#include "Game.h"
+#include "../engine/Game.h"
 #include <string>
 #include <vector>
 
@@ -7,12 +7,12 @@ namespace poker {
 
 struct LobbyConfig {
   std::string roomCode;
-  int maxSeats = 9;
+  int maxSeats = 6;
   int startingStack = 1000;
   int smallBlind = 5;
   int bigBlind = 10;
-  int actionTimeout = 0; // 0 = infinite
-  bool godMode = false;  // Spectators see all cards + live equity
+  int actionTimeout = 0; // infinite
+  bool godMode = true;   // Spectators see all cards + live equity
 };
 
 struct User {
@@ -44,7 +44,7 @@ public:
   bool kickPlayer(std::string hostId, std::string targetId);
   bool setButtonPos(std::string hostId, int pos);
 
-  // Test/system access
+  // For tests
   void setPlayerStack(int seatIndex, int amount);
   void setButtonPos(int pos);
 
@@ -56,6 +56,19 @@ public:
   std::string getHostId() const { return hostId; }
   bool isGameInProgress() const { return gameInProgress; }
   bool isUserHost(std::string id) const { return id == hostId; }
+  bool isSpectator(const std::string &id) const;
+
+  // Connection management
+  void disconnectPlayer(const std::string &id);
+  bool reconnectPlayer(const std::string &id);
+
+  // Per-viewer serialisation (handles card masking & spectator view equities)
+  nlohmann::json
+  toJsonForViewer(const std::string &viewerId,
+                  const nlohmann::json *cachedEquities = nullptr) const;
+  nlohmann::json computeEquities() const;
+
+  friend void to_json(nlohmann::json &j, const Lobby &l);
 
 private:
   Game game;
