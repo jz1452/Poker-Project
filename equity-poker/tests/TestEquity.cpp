@@ -51,7 +51,7 @@ void testEquity() {
 
   // 4. Post-Flop: Flush Draw vs Top Pair
   // Board: As Ks 2d
-  // P1: Qs Js (Flush Draw + Straight Draw) -> HUGE favorite
+  // P1: Qs Js (Flush Draw + Straight Draw)
   // Top Pair P2: Ad Kd (Top Two Pair)
   std::vector<Card> draw = {Card(Card::RANK_Q, Card::SUIT_SPADES),
                             Card(Card::RANK_J, Card::SUIT_SPADES)};

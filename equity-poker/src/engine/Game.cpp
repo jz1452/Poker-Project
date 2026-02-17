@@ -82,7 +82,8 @@ void Game::startHand() {
     currentActor = nextActivePlayer(bbPos);
   }
 
-  lastAggressor = currentActor;
+  // Preflop action is initially opened by the big blind posting.
+  lastAggressor = bbPos;
   stage = GameStage::PreFlop;
 }
 
@@ -127,6 +128,8 @@ bool Game::playerAction(std::string id, std::string action, int amount) {
   Player &p = seats[currentActor];
   if (p.id != id)
     return false;
+  if (p.status != PlayerStatus::Active)
+    return false;
 
   if (action == "fold") {
     p.status = PlayerStatus::Folded;
@@ -139,6 +142,7 @@ bool Game::playerAction(std::string id, std::string action, int amount) {
           break;
         }
       }
+
       distributePot();
       return true;
     }
@@ -187,7 +191,7 @@ bool Game::playerAction(std::string id, std::string action, int amount) {
         minRaise = raiseSize;
         lastAggressor = currentActor;
       }
-      // Short shove: doesn't reopen, don't update lastAggressor
+
       currentBet = p.currentBet;
     }
   } else {
@@ -214,7 +218,7 @@ void Game::nextTurn() {
 
   // BB checked their option
   if (stage == GameStage::PreFlop && currentActor == bbPos &&
-      currentActor == lastAggressor) {
+      currentActor == lastAggressor && currentBet == config.bigBlind) {
     if (seats[currentActor].currentBet == currentBet)
       roundEnds = true;
   }
@@ -239,7 +243,7 @@ void Game::nextTurn() {
 
   currentActor = next;
 
-  // If next actor is disconnected, auto-fold/check recursively
+  // If next actor is disconnected, auto-fold/check
   if (seats[currentActor].status == PlayerStatus::Active &&
       !seats[currentActor].isConnected) {
     if (!playerAction(seats[currentActor].id, "check")) {
@@ -339,7 +343,7 @@ void Game::distributePot() {
   Evaluator eval;
   showdownResults.clear();
 
-  // Detect all-in showdown (< 2 Active players = everyone was all-in)
+  // Detect all-in showdown
   int activeBettors = 0;
   for (const auto &p : seats) {
     if (p.status == PlayerStatus::Active)
@@ -399,7 +403,7 @@ void Game::distributePot() {
       chipsWonPerSeat[w] += share;
     }
 
-    // Odd chip goes to first winner left of button
+    // Distribute remaining chips one by one to players left of button
     if (remainder > 0) {
       int current = buttonPos;
       for (int i = 0; i < config.maxSeats && remainder > 0; i++) {
@@ -456,8 +460,9 @@ bool Game::playerMuckOrShow(std::string id, bool show) {
       // Fold-winner can freely toggle
       if (foldWinner == i) {
         seats[i].showCards = show;
-        // Fold-winner decided → transition to Idle
+        
         stage = GameStage::Idle;
+        foldWinner = -1;
         return true;
       }
 
@@ -495,7 +500,7 @@ void Game::checkShowdownResolved() {
       return; // Someone still hasn't decided
   }
 
-  // Everyone has decided → transition to Idle
+  // Everyone has decided --> transition to Idle
   stage = GameStage::Idle;
 }
 

@@ -20,6 +20,7 @@ struct User {
   std::string name;
   bool isSpectator = true;
   bool isHost = false;
+  bool isConnected = true;
 };
 
 // Manages table setup, user roles, and game lifecycle.

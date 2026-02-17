@@ -51,6 +51,7 @@ public:
   const std::vector<Card> &getBoard() const { return board; }
   int getPot() const { return pot; }
   int getCurrentActor() const { return currentActor; }
+  Config getGameConfig() const { return config; }
   GameStage getStage() const { return stage; }
   int getButtonPos() const { return buttonPos; }
   int getCurrentBet() const { return currentBet; }
@@ -92,7 +93,7 @@ private:
   void nextStreet();
   void resolveSidePots();
   void distributePot();
-  void checkShowdownResolved(); // Auto-transition Showdown → Idle
+  void checkShowdownResolved();
   int nextActivePlayer(int current);
   int nextBettingPlayer(int current);
   int activePlayerCount() const;

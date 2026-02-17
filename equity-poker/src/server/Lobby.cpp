@@ -13,12 +13,24 @@ bool Lobby::join(std::string id, std::string name) {
       return false;
   }
 
+  bool hasConnectedHost = false;
+  for (const auto &u : users) {
+    if (u.isHost && u.isConnected) {
+      hasConnectedHost = true;
+      break;
+    }
+  }
+
   User u;
   u.id = id;
   u.name = name;
   u.isSpectator = true;
+  u.isConnected = true;
 
-  if (users.empty()) {
+  if (!hasConnectedHost) {
+    for (auto &existing : users) {
+      existing.isHost = false;
+    }
     u.isHost = true;
     hostId = id;
   }
@@ -31,27 +43,29 @@ bool Lobby::leave(std::string id) {
   for (auto it = users.begin(); it != users.end(); ++it) {
     if (it->id == id) {
       bool wasHost = it->isHost;
-
-      // If mid-hand and it's their turn, auto-fold first
-      int seatIdx = game.findSeatIndex(id);
-      if (seatIdx >= 0 && gameInProgress &&
-          game.getStage() != GameStage::Showdown &&
-          game.getStage() != GameStage::Idle) {
-        if (game.getCurrentActor() == seatIdx) {
-          game.playerAction(id, "fold");
-        }
-      }
-
       standPlayer(id);
       users.erase(it);
 
-      if (wasHost && !users.empty()) {
-        users[0].isHost = true;
-        hostId = users[0].id;
-      } else if (users.empty()) {
-        hostId = "";
+      if (users.empty()) {
         gameInProgress = false;
+        hostId.clear();
+        return true;
       }
+
+      if (wasHost || hostId == id) {
+        hostId.clear();
+        for (auto &u : users) {
+          u.isHost = false;
+        }
+        for (auto &u : users) {
+          if (u.isConnected) {
+            u.isHost = true;
+            hostId = u.id;
+            break;
+          }
+        }
+      }
+
       return true;
     }
   }
@@ -87,7 +101,7 @@ int Lobby::sitPlayer(std::string id, int seatIndex, int buyInAmount) {
   }
 
   if (buyInAmount <= 0)
-    return -1;
+    buyInAmount = game.getGameConfig().startingStack;
 
   game.seats[seatIndex].id = id;
   game.seats[seatIndex].name = user->name;
@@ -99,7 +113,7 @@ int Lobby::sitPlayer(std::string id, int seatIndex, int buyInAmount) {
 }
 
 bool Lobby::standPlayer(std::string id) {
-  // If mid-hand and it's their turn, auto-fold first
+  // If mid-hand and it's their turn, auto-fold
   int seatIdx = game.findSeatIndex(id);
   if (seatIdx >= 0 && gameInProgress &&
       game.getStage() != GameStage::Showdown &&
@@ -132,11 +146,8 @@ bool Lobby::standPlayer(std::string id) {
 }
 
 bool Lobby::rebuy(std::string id, int amount) {
-  // Rebuy allowed if: no game running, OR hand is over
-  bool handOver =
-      (game.getStage() == GameStage::Idle ||
-       game.getStage() == GameStage::Showdown || game.getFoldWinner() >= 0);
-  if (gameInProgress && !handOver)
+  // Rebuy is only allowed when table is in Idle (between hands)
+  if (game.getStage() != GameStage::Idle)
     return false;
   if (amount <= 0)
     return false;
@@ -144,6 +155,10 @@ bool Lobby::rebuy(std::string id, int amount) {
   for (auto &p : game.seats) {
     if (p.id == id) {
       p.chips += amount;
+      if (p.chips > 0 && p.isConnected &&
+          p.status == PlayerStatus::SittingOut) {
+        p.status = PlayerStatus::Waiting;
+      }
       return true;
     }
   }
@@ -174,8 +189,40 @@ bool Lobby::startGame(std::string hostId) {
 bool Lobby::endGame(std::string hostId) {
   if (this->hostId != hostId)
     return false;
+
   gameInProgress = false;
+
+  // Reset transient hand state while preserving seated players, chips,
+  // and host/lobby membership.
   game.stage = GameStage::Idle;
+  game.board.clear();
+  game.sidePots.clear();
+  game.showdownResults.clear();
+  game.isAllInShowdown = false;
+  game.foldWinner = -1;
+  game.pot = 0;
+  game.currentBet = 0;
+  game.minRaise = game.config.bigBlind;
+  game.currentActor = -1;
+  game.lastAggressor = -1;
+  game.sbPos = -1;
+  game.bbPos = -1;
+
+  for (auto &p : game.seats) {
+    p.hand.clear();
+    p.currentBet = 0;
+    p.totalBet = 0;
+    p.showCards = false;
+
+    if (p.id.empty()) {
+      p.status = PlayerStatus::SittingOut;
+    } else if (p.chips > 0 && p.isConnected) {
+      p.status = PlayerStatus::Waiting;
+    } else {
+      p.status = PlayerStatus::SittingOut;
+    }
+  }
+
   return true;
 }
 
@@ -185,10 +232,8 @@ bool Lobby::startNextHand(std::string hostId) {
   if (!gameInProgress)
     return false;
 
-  // Only allow starting a new hand if the current one is over
-  bool handOver = (game.getStage() == GameStage::Idle ||
-                   game.getStage() == GameStage::Showdown);
-  if (!handOver)
+  // Only allow starting a new hand when the table is explicitly Idle
+  if (game.getStage() != GameStage::Idle)
     return false;
 
   int count = 0;
@@ -264,6 +309,17 @@ bool Lobby::isSpectator(const std::string &id) const {
 }
 
 void Lobby::disconnectPlayer(const std::string &id) {
+  for (auto &u : users) {
+    if (u.id == id) {
+      u.isConnected = false;
+      if (u.isHost || hostId == id) {
+        u.isHost = false;
+        hostId.clear();
+      }
+      break;
+    }
+  }
+
   // Mark the player's seat as disconnected
   for (auto &p : game.seats) {
     if (p.id == id) {
@@ -284,10 +340,11 @@ void Lobby::disconnectPlayer(const std::string &id) {
 }
 
 bool Lobby::reconnectPlayer(const std::string &id) {
-  // Verify the user exists in the lobby
+  // Verify the user exists in the lobby and mark them connected.
   bool found = false;
-  for (const auto &u : users) {
+  for (auto &u : users) {
     if (u.id == id) {
+      u.isConnected = true;
       found = true;
       break;
     }
@@ -299,14 +356,35 @@ bool Lobby::reconnectPlayer(const std::string &id) {
   for (auto &p : game.seats) {
     if (p.id == id) {
       p.isConnected = true;
-      // If they were SittingOut due to disconnect, make them Waiting
-      // so they get dealt into the next hand
+      // mark as waiting so they get dealt into the next hand
       if (p.status == PlayerStatus::SittingOut && p.chips > 0) {
         p.status = PlayerStatus::Waiting;
       }
       break;
     }
   }
+
+  bool hasConnectedHost = false;
+  for (const auto &u : users) {
+    if (u.isHost && u.isConnected) {
+      hasConnectedHost = true;
+      break;
+    }
+  }
+
+  if (!hasConnectedHost) {
+    for (auto &u : users) {
+      u.isHost = false;
+    }
+    for (auto &u : users) {
+      if (u.id == id) {
+        u.isHost = true;
+        hostId = id;
+        break;
+      }
+    }
+  }
+
   return true;
 }
 
@@ -394,7 +472,8 @@ void to_json(nlohmann::json &j, const User &u) {
   j = nlohmann::json{{"id", u.id},
                      {"name", u.name},
                      {"isSpectator", u.isSpectator},
-                     {"isHost", u.isHost}};
+                     {"isHost", u.isHost},
+                     {"isConnected", u.isConnected}};
 }
 
 void to_json(nlohmann::json &j, const Lobby &l) {

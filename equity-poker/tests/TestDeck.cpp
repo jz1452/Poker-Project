@@ -14,7 +14,7 @@ void assert_exact_rank(const std::string &handName, int score, int expected) {
   if (score == expected) {
     std::cout << "[PASS] " << handName << ": " << score << std::endl;
   } else {
-    // exit eagerly if it fails
+    
     std::cout << "[FAIL] " << handName << ": " << score
               << " != Expected: " << expected << std::endl;
     std::exit(1);
