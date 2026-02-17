@@ -108,6 +108,7 @@ export default function App() {
   const setBuyInModal = useGameStore((s) => s.setBuyInModal);
   const setRaiseAmount = useGameStore((s) => s.setRaiseAmount);
   const removeToast = useGameStore((s) => s.removeToast);
+  const sendChatMessage = useGameStore((s) => s.sendChatMessage);
 
   const stage = game?.stage || "Idle";
   const stageIsIdle = stage === "Idle";
@@ -255,12 +256,12 @@ export default function App() {
         </div>
       )}
 
-      <header className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+      <header className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/70 p-2.5">
         <div>
           <div className="text-sm text-slate-300">
             Connected as <span className="font-semibold text-slate-100">{connection.playerName}</span>
+            <span className="ml-2 text-xs text-slate-500">({connection.socketStatus})</span>
           </div>
-          <div className="text-xs text-slate-500">Status: {connection.socketStatus}</div>
         </div>
 
         <div className="flex items-center gap-2">
@@ -291,6 +292,7 @@ export default function App() {
           setBuyInModal(true, seatIndex);
         }}
         onHostAction={(action, payload = {}) => sendAction(action, payload)}
+        onSendChat={sendChatMessage}
       />
 
       <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_320px]">

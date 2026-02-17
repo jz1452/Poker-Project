@@ -1,8 +1,17 @@
 #include "Lobby.h"
 #include "../poker/EquityCalculator.h"
+#include <chrono>
 #include <nlohmann/json.hpp>
 
 namespace poker {
+
+static std::string trimCopy(const std::string &input) {
+  size_t start = input.find_first_not_of(" \t\r\n");
+  if (start == std::string::npos)
+    return "";
+  size_t end = input.find_last_not_of(" \t\r\n");
+  return input.substr(start, end - start + 1);
+}
 
 // User Management
 
@@ -49,6 +58,8 @@ bool Lobby::leave(std::string id) {
       if (users.empty()) {
         gameInProgress = false;
         hostId.clear();
+        chatMessages.clear();
+        nextChatMessageId = 1;
         return true;
       }
 
@@ -163,6 +174,40 @@ bool Lobby::rebuy(std::string id, int amount) {
     }
   }
   return false; // Not seated
+}
+
+bool Lobby::addChatMessage(const std::string &userId, const std::string &text) {
+  const User *sender = nullptr;
+  for (const auto &u : users) {
+    if (u.id == userId) {
+      sender = &u;
+      break;
+    }
+  }
+  if (!sender)
+    return false;
+
+  std::string cleaned = trimCopy(text);
+  if (cleaned.empty())
+    return false;
+  if (cleaned.size() > 280)
+    cleaned = cleaned.substr(0, 280);
+
+  ChatMessage msg;
+  msg.id = std::to_string(nextChatMessageId++);
+  msg.userId = userId;
+  msg.name = sender->name;
+  msg.text = cleaned;
+  msg.timestamp =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+
+  chatMessages.push_back(std::move(msg));
+  if ((int)chatMessages.size() > maxChatMessages) {
+    chatMessages.erase(chatMessages.begin());
+  }
+  return true;
 }
 
 // Host Actions
@@ -476,9 +521,18 @@ void to_json(nlohmann::json &j, const User &u) {
                      {"isConnected", u.isConnected}};
 }
 
+void to_json(nlohmann::json &j, const ChatMessage &m) {
+  j = nlohmann::json{{"id", m.id},
+                     {"userId", m.userId},
+                     {"name", m.name},
+                     {"text", m.text},
+                     {"timestamp", m.timestamp}};
+}
+
 void to_json(nlohmann::json &j, const Lobby &l) {
   j = nlohmann::json{{"lobbyConfig", l.lobbyConfig},
                      {"users", l.users},
+                     {"chatMessages", l.chatMessages},
                      {"hostId", l.hostId},
                      {"isGameInProgress", l.gameInProgress},
                      {"game", l.game}};

@@ -167,6 +167,16 @@ int main() {
                        if (!success)
                          errorMsg = "Rebuy failed (hand in progress?)";
                      }
+                   } else if (action == "chat") {
+                     if (userData->userId.empty()) {
+                       errorMsg = "Must join first";
+                     } else {
+                       std::string messageText = j.value("message", "");
+                       success =
+                           lobby.addChatMessage(userData->userId, messageText);
+                       if (!success)
+                         errorMsg = "Invalid chat message";
+                     }
                    } else if (action == "update_config") {
                      poker::LobbyConfig newConfig;
                      newConfig.maxSeats = j.value("maxSeats", 6);
@@ -194,8 +204,11 @@ int main() {
                          // Also disconnect the kicked player's socket
                          auto it = connectedSockets.find(targetId);
                          if (it != connectedSockets.end()) {
+                           json kickedResp;
+                           kickedResp["type"] = "kicked";
+                           kickedResp["message"] = "You were kicked by the host.";
+                           it->second->send(kickedResp.dump(), uWS::OpCode::TEXT);
                            it->second->close();
-                           connectedSockets.erase(it);
                          }
                        } else {
                          errorMsg = "Failed (not host or invalid target)";

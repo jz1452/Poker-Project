@@ -23,6 +23,14 @@ struct User {
   bool isConnected = true;
 };
 
+struct ChatMessage {
+  std::string id;
+  std::string userId;
+  std::string name;
+  std::string text;
+  long long timestamp = 0;
+};
+
 // Manages table setup, user roles, and game lifecycle.
 class Lobby {
 public:
@@ -36,6 +44,7 @@ public:
   int sitPlayer(std::string id, int seatIndex, int buyInAmount);
   bool standPlayer(std::string id);
   bool rebuy(std::string id, int amount);
+  bool addChatMessage(const std::string &userId, const std::string &text);
 
   // Host actions
   bool startGame(std::string hostId);
@@ -74,6 +83,9 @@ public:
 private:
   Game game;
   std::vector<User> users;
+  std::vector<ChatMessage> chatMessages;
+  int nextChatMessageId = 1;
+  static constexpr int maxChatMessages = 100;
   std::string hostId;
   bool gameInProgress = false;
   LobbyConfig lobbyConfig;

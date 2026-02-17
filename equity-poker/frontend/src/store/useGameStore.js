@@ -135,6 +135,31 @@ export const useGameStore = create((set, get) => ({
     return true;
   },
 
+  sendChatMessage: (message) => {
+    const trimmed = typeof message === "string" ? message.trim() : "";
+    if (!trimmed) return false;
+
+    const sent = wsClient.send({
+      action: "chat",
+      message: trimmed.slice(0, 280)
+    });
+
+    if (!sent) {
+      set((state) => ({
+        connection: {
+          ...state.connection,
+          lastError: "Not connected."
+        },
+        ui: {
+          ...state.ui,
+          toasts: pushToast(state.ui, "Chat failed: socket not connected.", "error")
+        }
+      }));
+    }
+
+    return sent;
+  },
+
   leaveRoom: () => {
     wsClient.send({ action: "leave" });
     wsClient.setJoinPayload(null);
@@ -228,6 +253,34 @@ export const useGameStore = create((set, get) => ({
 
   handleIncomingMessage: (msg) => {
     if (!msg || typeof msg !== "object") return;
+
+    if (msg.type === "kicked") {
+      const message = msg.message || "You were kicked from the room.";
+      clearSession();
+      wsClient.setJoinPayload(null);
+      wsClient.disconnect({ manual: true });
+
+      set((state) => ({
+        connection: {
+          ...state.connection,
+          socketStatus: "disconnected",
+          reconnectAttempt: 0,
+          showReconnectBanner: false,
+          userId: "",
+          hasJoined: false,
+          lastError: message
+        },
+        snapshot: null,
+        ui: {
+          ...state.ui,
+          pendingAction: null,
+          buyInModalOpen: false,
+          selectedSeat: null,
+          toasts: pushToast(state.ui, message, "error")
+        }
+      }));
+      return;
+    }
 
     if (msg.type === "joinSuccess") {
       const nextUserId = msg.userId || "";

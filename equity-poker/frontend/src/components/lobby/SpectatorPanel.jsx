@@ -1,11 +1,13 @@
-export default function SpectatorPanel({ users }) {
+export default function SpectatorPanel({ users, embedded = false }) {
   const usersList = Array.isArray(users) ? users : [];
   const spectators = usersList.filter((u) => u.isSpectator);
   const players = usersList.filter((u) => !u.isSpectator);
 
-  return (
-    <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-4">
-      <h3 className="mb-3 text-sm font-semibold text-slate-200">Room Members</h3>
+  const content = (
+    <>
+      {!embedded && (
+        <h3 className="mb-3 text-sm font-semibold text-slate-200">Room Members</h3>
+      )}
 
       <div className="mb-3">
         <div className="mb-1 text-xs uppercase text-slate-400">Players</div>
@@ -30,6 +32,14 @@ export default function SpectatorPanel({ users }) {
           ))}
         </div>
       </div>
+    </>
+  );
+
+  if (embedded) return content;
+
+  return (
+    <div className="rounded-2xl border border-slate-700 bg-slate-900/70 p-4">
+      {content}
     </div>
   );
 }
