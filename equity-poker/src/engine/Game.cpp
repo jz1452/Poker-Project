@@ -7,10 +7,16 @@ namespace poker {
 
 void Game::startHand() {
   // Reset players first so that disconnected --> SittingOut, no chips -->
-  // SittingOut
+  // SittingOut. Also clear stale dead-money state on empty seats.
   for (auto &p : seats) {
-    if (p.status != PlayerStatus::SittingOut)
-      p.resetHand();
+    if (p.status == PlayerStatus::SittingOut) {
+      p.currentBet = 0;
+      p.totalBet = 0;
+      p.hand.clear();
+      p.showCards = false;
+      continue;
+    }
+    p.resetHand();
   }
 
   // Count active players AFTER reset (so disconnected players are excluded)
@@ -30,6 +36,7 @@ void Game::startHand() {
   showdownResults.clear();
   isAllInShowdown = false;
   foldWinner = -1;
+  hasActedThisStreet.assign(config.maxSeats, false);
   deck = Deck();
   deck.shuffle(rng);
 
@@ -82,8 +89,8 @@ void Game::startHand() {
     currentActor = nextActivePlayer(bbPos);
   }
 
-  // Preflop action is initially opened by the big blind posting.
-  lastAggressor = bbPos;
+  // Compatibility field no longer drives round completion.
+  lastAggressor = -1;
   stage = GameStage::PreFlop;
 }
 
@@ -121,18 +128,56 @@ int Game::activePlayerCount() const {
   return count;
 }
 
+int Game::bettingPlayerCount() const {
+  int count = 0;
+  for (const auto &p : seats) {
+    if (p.status == PlayerStatus::Active)
+      count++;
+  }
+  return count;
+}
+
+bool Game::bettingRoundComplete() const {
+  for (int i = 0; i < config.maxSeats; i++) {
+    if (seats[i].status != PlayerStatus::Active)
+      continue;
+    if (!hasActedThisStreet[i])
+      return false;
+    if (seats[i].currentBet != currentBet)
+      return false;
+  }
+  return true;
+}
+
+int Game::nextActorNeedingAction(int current) const {
+  int idx = current;
+  for (int i = 0; i < config.maxSeats; i++) {
+    idx = (idx + 1) % config.maxSeats;
+    if (seats[idx].status != PlayerStatus::Active)
+      continue;
+    if (!hasActedThisStreet[idx] || seats[idx].currentBet != currentBet)
+      return idx;
+  }
+  return -1;
+}
+
 bool Game::playerAction(std::string id, std::string action, int amount) {
   if (stage == GameStage::Showdown || stage == GameStage::Idle)
     return false;
 
-  Player &p = seats[currentActor];
+  const int actorIndex = currentActor;
+  Player &p = seats[actorIndex];
   if (p.id != id)
     return false;
   if (p.status != PlayerStatus::Active)
     return false;
 
+  bool reopenedBetting = false;
+
   if (action == "fold") {
     p.status = PlayerStatus::Folded;
+    hasActedThisStreet[actorIndex] = true;
+
     if (activePlayerCount() == 1) {
       // Record fold-winner so they can optionally show
       for (int i = 0; i < config.maxSeats; i++) {
@@ -148,20 +193,47 @@ bool Game::playerAction(std::string id, std::string action, int amount) {
     }
   } else if (action == "call") {
     int callCost = currentBet - p.currentBet;
-    if (callCost >= p.chips)
-      return playerAction(id, "allin", 0); // Auto all-in
+    if (callCost <= 0) {
+      hasActedThisStreet[actorIndex] = true;
+    } else if (callCost >= p.chips) {
+      int allInAmount = p.chips;
+      if (allInAmount <= 0)
+        return false;
 
-    p.chips -= callCost;
-    p.currentBet += callCost;
-    p.totalBet += callCost;
-    pot += callCost;
+      const int oldCurrentBet = currentBet;
+      p.chips = 0;
+      p.currentBet += allInAmount;
+      p.totalBet += allInAmount;
+      pot += allInAmount;
+      p.status = PlayerStatus::AllIn;
+      hasActedThisStreet[actorIndex] = true;
+
+      if (p.currentBet > oldCurrentBet) {
+        int raiseSize = p.currentBet - oldCurrentBet;
+        currentBet = p.currentBet;
+        // Re-open only for full raises.
+        if (raiseSize >= minRaise) {
+          minRaise = raiseSize;
+          reopenedBetting = true;
+        }
+      }
+    } else {
+      p.chips -= callCost;
+      p.currentBet += callCost;
+      p.totalBet += callCost;
+      pot += callCost;
+      hasActedThisStreet[actorIndex] = true;
+    }
   } else if (action == "check") {
     if (currentBet > p.currentBet)
       return false;
+    hasActedThisStreet[actorIndex] = true;
   } else if (action == "raise") {
     // amount is the TOTAL bet (e.g. "raise to 200")
     int toAdd = amount - p.currentBet;
 
+    if (toAdd <= 0)
+      return false;
     if (toAdd > p.chips)
       return false;
     if (amount < currentBet + minRaise)
@@ -175,27 +247,41 @@ bool Game::playerAction(std::string id, std::string action, int amount) {
     int raiseDiff = amount - currentBet;
     currentBet = amount;
     minRaise = raiseDiff;
-    lastAggressor = currentActor;
+    reopenedBetting = true;
+    hasActedThisStreet[actorIndex] = true;
   } else if (action == "allin") {
     int allInAmount = p.chips;
+    if (allInAmount <= 0)
+      return false;
+
+    const int oldCurrentBet = currentBet;
     p.chips = 0;
     p.currentBet += allInAmount;
     p.totalBet += allInAmount;
     pot += allInAmount;
     p.status = PlayerStatus::AllIn;
+    hasActedThisStreet[actorIndex] = true;
 
-    if (p.currentBet > currentBet) {
-      int raiseSize = p.currentBet - currentBet;
-      // Only reopen betting if it's a full raise
+    if (p.currentBet > oldCurrentBet) {
+      int raiseSize = p.currentBet - oldCurrentBet;
+      currentBet = p.currentBet;
+      // Re-open only for full raises.
       if (raiseSize >= minRaise) {
         minRaise = raiseSize;
-        lastAggressor = currentActor;
+        reopenedBetting = true;
       }
-
-      currentBet = p.currentBet;
     }
   } else {
     return false;
+  }
+
+  if (reopenedBetting) {
+    for (int i = 0; i < config.maxSeats; i++) {
+      if (seats[i].status == PlayerStatus::Active) {
+        hasActedThisStreet[i] = false;
+      }
+    }
+    hasActedThisStreet[actorIndex] = true;
   }
 
   nextTurn();
@@ -203,40 +289,26 @@ bool Game::playerAction(std::string id, std::string action, int amount) {
 }
 
 void Game::nextTurn() {
-  int next = nextBettingPlayer(currentActor);
-  bool roundEnds = false;
+  if (stage == GameStage::Showdown || stage == GameStage::Idle)
+    return;
 
-  // Full orbit complete or no other bettor remains
-  if (next == lastAggressor || next == currentActor) {
-    roundEnds = true;
-    // Exception: BB option pre-flop (hasn't acted yet)
-    if (stage == GameStage::PreFlop && next == bbPos &&
-        currentBet == config.bigBlind && next != currentActor) {
-      roundEnds = false;
-    }
-  }
-
-  // BB checked their option
-  if (stage == GameStage::PreFlop && currentActor == bbPos &&
-      currentActor == lastAggressor && currentBet == config.bigBlind) {
-    if (seats[currentActor].currentBet == currentBet)
-      roundEnds = true;
-  }
-
-  if (roundEnds) {
-    if (stage == GameStage::Showdown || stage == GameStage::Idle)
-      return;
+  if (bettingRoundComplete()) {
     nextStreet();
-    // Auto-walk remaining streets if < 2 players can bet (all-in scenario)
-    if (stage != GameStage::Showdown && stage != GameStage::Idle) {
-      int bettingPlayers = 0;
-      for (auto &p : seats)
-        if (p.status == PlayerStatus::Active)
-          bettingPlayers++;
-      if (bettingPlayers < 2 && activePlayerCount() > 1) {
-        while (stage != GameStage::Showdown && stage != GameStage::Idle)
-          nextStreet();
-      }
+
+    // Auto-walk remaining streets when fewer than two players can bet.
+    while (stage != GameStage::Showdown && stage != GameStage::Idle &&
+           bettingPlayerCount() < 2 && activePlayerCount() > 1) {
+      nextStreet();
+    }
+    return;
+  }
+
+  int next = nextActorNeedingAction(currentActor);
+  if (next < 0) {
+    nextStreet();
+    while (stage != GameStage::Showdown && stage != GameStage::Idle &&
+           bettingPlayerCount() < 2 && activePlayerCount() > 1) {
+      nextStreet();
     }
     return;
   }
@@ -256,6 +328,7 @@ void Game::nextStreet() {
   currentBet = 0;
   minRaise = config.bigBlind;
   lastAggressor = -1;
+  hasActedThisStreet.assign(config.maxSeats, false);
 
   for (auto &p : seats) {
     if (p.status != PlayerStatus::Folded &&
@@ -285,9 +358,11 @@ void Game::nextStreet() {
       board.push_back(deck.deal());
   }
 
+  if (bettingPlayerCount() == 0)
+    return;
+
   // Post-flop action starts left of button
   currentActor = nextBettingPlayer(buttonPos);
-  lastAggressor = currentActor;
 
   // If start-of-street actor is disconnected, auto-fold/check recursively
   if (seats[currentActor].status == PlayerStatus::Active &&
@@ -457,10 +532,9 @@ bool Game::playerMuckOrShow(std::string id, bool show) {
 
   for (int i = 0; i < config.maxSeats; i++) {
     if (seats[i].id == id) {
-      // Fold-winner can freely toggle
+
       if (foldWinner == i) {
         seats[i].showCards = show;
-        
         stage = GameStage::Idle;
         foldWinner = -1;
         return true;

@@ -16,6 +16,78 @@ using WebSocket = uWS::WebSocket<false, true, PerSocketData>;
 // Global state
 poker::Lobby lobby;
 std::unordered_map<std::string, WebSocket *> connectedSockets;
+std::unordered_map<WebSocket *, std::string> socketOwners;
+
+bool isCurrentSocketForUser(WebSocket *ws, const std::string &userId) {
+  auto it = connectedSockets.find(userId);
+  return it != connectedSockets.end() && it->second == ws;
+}
+
+void unbindSocket(WebSocket *ws) {
+  auto ownerIt = socketOwners.find(ws);
+  if (ownerIt == socketOwners.end())
+    return;
+
+  const std::string userId = ownerIt->second;
+  socketOwners.erase(ownerIt);
+
+  auto connIt = connectedSockets.find(userId);
+  if (connIt != connectedSockets.end() && connIt->second == ws) {
+    connectedSockets.erase(connIt);
+  }
+
+  PerSocketData *userData = ws->getUserData();
+  if (userData->userId == userId) {
+    userData->userId.clear();
+  }
+}
+
+void unbindUser(const std::string &userId) {
+  auto connIt = connectedSockets.find(userId);
+  if (connIt == connectedSockets.end())
+    return;
+
+  WebSocket *ws = connIt->second;
+  connectedSockets.erase(connIt);
+
+  auto ownerIt = socketOwners.find(ws);
+  if (ownerIt != socketOwners.end() && ownerIt->second == userId) {
+    socketOwners.erase(ownerIt);
+  }
+
+  PerSocketData *userData = ws->getUserData();
+  if (userData->userId == userId) {
+    userData->userId.clear();
+  }
+}
+
+void bindSocketToUser(WebSocket *ws, const std::string &userId) {
+  // Detach any previous user binding on this socket.
+  unbindSocket(ws);
+
+  // Replace older socket for the same user.
+  auto existing = connectedSockets.find(userId);
+  if (existing != connectedSockets.end() && existing->second != ws) {
+    WebSocket *oldWs = existing->second;
+    connectedSockets.erase(existing);
+
+    auto oldOwner = socketOwners.find(oldWs);
+    if (oldOwner != socketOwners.end()) {
+      socketOwners.erase(oldOwner);
+    }
+
+    PerSocketData *oldData = oldWs->getUserData();
+    if (oldData->userId == userId) {
+      oldData->userId.clear();
+    }
+
+    oldWs->close();
+  }
+
+  connectedSockets[userId] = ws;
+  socketOwners[ws] = userId;
+  ws->getUserData()->userId = userId;
+}
 
 // Send personalised state to every connected client
 void broadcastToAll() {
@@ -82,7 +154,10 @@ int main() {
                    bool success = false;
                    std::string errorMsg;
 
-                   if (action == "join") {
+                   if (action != "join" && !userData->userId.empty() &&
+                       !isCurrentSocketForUser(ws, userData->userId)) {
+                     errorMsg = "Stale connection. Please reconnect.";
+                   } else if (action == "join") {
                      std::string name = j.value("name", "");
                      std::string id = j.value("id", "");
                      if (name.empty()) {
@@ -94,13 +169,11 @@ int main() {
                        }
                        // Try reconnect first, then fresh join
                        if (lobby.reconnectPlayer(id)) {
-                         userData->userId = id;
-                         connectedSockets[id] = ws;
+                         bindSocketToUser(ws, id);
                          std::cout << "Player reconnected: " << id << std::endl;
                          success = true;
                        } else if (lobby.join(id, name)) {
-                         userData->userId = id;
-                         connectedSockets[id] = ws;
+                         bindSocketToUser(ws, id);
                          success = true;
                        } else {
                          errorMsg = "Could not join";
@@ -204,11 +277,13 @@ int main() {
                          // Also disconnect the kicked player's socket
                          auto it = connectedSockets.find(targetId);
                          if (it != connectedSockets.end()) {
+                           WebSocket *targetWs = it->second;
                            json kickedResp;
                            kickedResp["type"] = "kicked";
                            kickedResp["message"] = "You were kicked by the host.";
-                           it->second->send(kickedResp.dump(), uWS::OpCode::TEXT);
-                           it->second->close();
+                           targetWs->send(kickedResp.dump(), uWS::OpCode::TEXT);
+                           unbindUser(targetId);
+                           targetWs->close();
                          }
                        } else {
                          errorMsg = "Failed (not host or invalid target)";
@@ -217,7 +292,7 @@ int main() {
                    } else if (action == "leave") {
                      success = lobby.leave(userData->userId);
                      if (success) {
-                       connectedSockets.erase(userData->userId);
+                       unbindUser(userData->userId);
                        userData->userId.clear();
                      }
                    } else {
@@ -246,14 +321,27 @@ int main() {
 
            .close =
                [](WebSocket *ws, int /*code*/, std::string_view /*message*/) {
-                 PerSocketData *userData = ws->getUserData();
-                 if (!userData->userId.empty()) {
-                   std::cout << "Client disconnected: " << userData->userId
-                             << std::endl;
-                   lobby.disconnectPlayer(userData->userId);
-                   connectedSockets.erase(userData->userId);
-                   broadcastToAll();
+                 auto ownerIt = socketOwners.find(ws);
+                 if (ownerIt == socketOwners.end())
+                   return;
+
+                 std::string userId = ownerIt->second;
+                 socketOwners.erase(ownerIt);
+
+                 auto connIt = connectedSockets.find(userId);
+                 if (connIt == connectedSockets.end() || connIt->second != ws) {
+                   return;
                  }
+
+                 connectedSockets.erase(connIt);
+                 PerSocketData *userData = ws->getUserData();
+                 if (userData->userId == userId) {
+                   userData->userId.clear();
+                 }
+
+                 std::cout << "Client disconnected: " << userId << std::endl;
+                 lobby.disconnectPlayer(userId);
+                 broadcastToAll();
                }})
       .listen(9001,
               [](auto *listen_socket) {

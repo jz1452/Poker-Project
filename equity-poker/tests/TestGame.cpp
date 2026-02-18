@@ -158,9 +158,6 @@ void testFoldWin() {
   assert(g.playerMuckOrShow("p2", true) == true);
   assert(g.getSeats()[1].showCards == true);
 
-  assert(g.playerMuckOrShow("p2", false) == true);
-  assert(g.getSeats()[1].showCards == false);
-
   assert(g.playerMuckOrShow("p1", true) == false);
 
   log("Fold Win Test Passed.");

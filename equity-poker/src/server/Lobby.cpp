@@ -13,6 +13,27 @@ static std::string trimCopy(const std::string &input) {
   return input.substr(start, end - start + 1);
 }
 
+void Lobby::cleanupOrphanedSeats() {
+  for (auto &p : game.seats) {
+    if (p.id.empty())
+      continue;
+
+    bool stillInRoom = false;
+    for (const auto &u : users) {
+      if (u.id == p.id) {
+        stillInRoom = true;
+        break;
+      }
+    }
+
+    if (!stillInRoom) {
+      p = Player();
+      p.status = PlayerStatus::SittingOut;
+      p.id.clear();
+    }
+  }
+}
+
 // User Management
 
 bool Lobby::join(std::string id, std::string name) {
@@ -124,36 +145,68 @@ int Lobby::sitPlayer(std::string id, int seatIndex, int buyInAmount) {
 }
 
 bool Lobby::standPlayer(std::string id) {
-  // If mid-hand and it's their turn, auto-fold
   int seatIdx = game.findSeatIndex(id);
-  if (seatIdx >= 0 && gameInProgress &&
-      game.getStage() != GameStage::Showdown &&
-      game.getStage() != GameStage::Idle) {
-    if (game.getCurrentActor() == seatIdx) {
-      game.playerAction(id, "fold");
+  if (seatIdx < 0)
+    return false;
+
+  Player &seat = game.seats[seatIdx];
+  const bool handInProgress =
+      gameInProgress && game.getStage() != GameStage::Showdown &&
+      game.getStage() != GameStage::Idle;
+  const bool wasInCurrentHand =
+      handInProgress && (seat.status == PlayerStatus::Active ||
+                         seat.status == PlayerStatus::Folded ||
+                         seat.status == PlayerStatus::AllIn);
+
+  if (wasInCurrentHand) {
+    bool foldedOutsideTurnFlow = false;
+    if (seat.status == PlayerStatus::Active) {
+      if (game.getCurrentActor() == seatIdx) {
+        game.playerAction(id, "fold");
+      } else {
+        seat.status = PlayerStatus::Folded;
+        foldedOutsideTurnFlow = true;
+      }
+    } else if (seat.status == PlayerStatus::AllIn) {
+      // Leave/stand should forfeit this hand, same as folding.
+      seat.status = PlayerStatus::Folded;
+      foldedOutsideTurnFlow = true;
     }
+
+    if (foldedOutsideTurnFlow && game.activePlayerCount() == 1) {
+      for (int i = 0; i < game.config.maxSeats; i++) {
+        if (game.seats[i].status == PlayerStatus::Active ||
+            game.seats[i].status == PlayerStatus::AllIn) {
+          game.foldWinner = i;
+          break;
+        }
+      }
+      game.distributePot();
+    }
+
+    // Vacate seat immediately, but keep committed chips as dead money until
+    // hand settlement is complete.
+    const int preservedCurrentBet = seat.currentBet;
+    const int preservedTotalBet = seat.totalBet;
+    seat = Player();
+    seat.status = PlayerStatus::SittingOut;
+    seat.currentBet = preservedCurrentBet;
+    seat.totalBet = preservedTotalBet;
+    seat.id.clear();
+  } else {
+    seat = Player();
+    seat.status = PlayerStatus::SittingOut;
+    seat.id.clear();
   }
 
-  bool found = false;
-  for (auto &p : game.seats) {
-    if (p.id == id) {
-      p = Player();
-      p.status = PlayerStatus::SittingOut;
-      p.id = "";
-      found = true;
+  for (auto &u : users) {
+    if (u.id == id) {
+      u.isSpectator = true;
       break;
     }
   }
 
-  if (found) {
-    for (auto &u : users) {
-      if (u.id == id) {
-        u.isSpectator = true;
-        break;
-      }
-    }
-  }
-  return found;
+  return true;
 }
 
 bool Lobby::rebuy(std::string id, int amount) {
@@ -218,6 +271,8 @@ bool Lobby::startGame(std::string hostId) {
   if (gameInProgress)
     return false;
 
+  cleanupOrphanedSeats();
+
   int count = 0;
   for (const auto &p : game.seats) {
     if (p.status != PlayerStatus::SittingOut && p.chips > 0)
@@ -280,6 +335,8 @@ bool Lobby::startNextHand(std::string hostId) {
   // Only allow starting a new hand when the table is explicitly Idle
   if (game.getStage() != GameStage::Idle)
     return false;
+
+  cleanupOrphanedSeats();
 
   int count = 0;
   for (const auto &p : game.seats) {

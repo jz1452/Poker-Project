@@ -38,6 +38,7 @@ public:
 
   Game(Config c = Config()) : config(c) {
     seats.resize(config.maxSeats);
+    hasActedThisStreet.resize(config.maxSeats, false);
     std::random_device rd;
     rng = std::mt19937(rd());
   }
@@ -82,6 +83,7 @@ private:
   int minRaise = 0;
   int currentBet = 0;
   int lastAggressor = -1;
+  std::vector<bool> hasActedThisStreet;
 
   GameStage stage = GameStage::Idle;
 
@@ -94,6 +96,9 @@ private:
   void resolveSidePots();
   void distributePot();
   void checkShowdownResolved();
+  bool bettingRoundComplete() const;
+  int nextActorNeedingAction(int current) const;
+  int bettingPlayerCount() const;
   int nextActivePlayer(int current);
   int nextBettingPlayer(int current);
   int activePlayerCount() const;

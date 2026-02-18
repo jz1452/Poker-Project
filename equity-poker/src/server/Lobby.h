@@ -81,6 +81,7 @@ public:
   friend void to_json(nlohmann::json &j, const Lobby &l);
 
 private:
+  void cleanupOrphanedSeats();
   Game game;
   std::vector<User> users;
   std::vector<ChatMessage> chatMessages;
