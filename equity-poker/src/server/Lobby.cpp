@@ -2,6 +2,7 @@
 #include "../poker/EquityCalculator.h"
 #include <chrono>
 #include <nlohmann/json.hpp>
+#include <unordered_set>
 
 namespace poker {
 
@@ -14,24 +15,11 @@ static std::string trimCopy(const std::string &input) {
 }
 
 void Lobby::cleanupOrphanedSeats() {
-  for (auto &p : game.seats) {
-    if (p.id.empty())
-      continue;
-
-    bool stillInRoom = false;
-    for (const auto &u : users) {
-      if (u.id == p.id) {
-        stillInRoom = true;
-        break;
-      }
-    }
-
-    if (!stillInRoom) {
-      p = Player();
-      p.status = PlayerStatus::SittingOut;
-      p.id.clear();
-    }
+  std::unordered_set<std::string> validUserIds;
+  for (const auto &u : users) {
+    validUserIds.insert(u.id);
   }
+  game.removeOrphanedSeats(validUserIds);
 }
 
 // User Management
@@ -118,86 +106,26 @@ int Lobby::sitPlayer(std::string id, int seatIndex, int buyInAmount) {
   if (!user)
     return -1;
 
-  if (seatIndex < 0 || seatIndex >= (int)game.seats.size())
+  if (seatIndex < 0 || seatIndex >= game.seatCount())
     return -1;
-
-  // Seat must be empty
-  if (game.seats[seatIndex].status != PlayerStatus::SittingOut &&
-      !game.seats[seatIndex].id.empty())
-    return -1;
-
-  // Can't sit in two seats
-  for (const auto &p : game.seats) {
-    if (p.id == id)
-      return -1;
-  }
 
   if (buyInAmount <= 0)
     buyInAmount = game.getGameConfig().startingStack;
 
-  game.seats[seatIndex].id = id;
-  game.seats[seatIndex].name = user->name;
-  game.seats[seatIndex].chips = buyInAmount;
-  game.seats[seatIndex].status = PlayerStatus::Waiting;
+  if (!game.sitPlayerAt(seatIndex, id, user->name, buyInAmount))
+    return -1;
 
   user->isSpectator = false;
   return seatIndex;
 }
 
 bool Lobby::standPlayer(std::string id) {
-  int seatIdx = game.findSeatIndex(id);
-  if (seatIdx < 0)
-    return false;
-
-  Player &seat = game.seats[seatIdx];
   const bool handInProgress =
       gameInProgress && game.getStage() != GameStage::Showdown &&
       game.getStage() != GameStage::Idle;
-  const bool wasInCurrentHand =
-      handInProgress && (seat.status == PlayerStatus::Active ||
-                         seat.status == PlayerStatus::Folded ||
-                         seat.status == PlayerStatus::AllIn);
 
-  if (wasInCurrentHand) {
-    bool foldedOutsideTurnFlow = false;
-    if (seat.status == PlayerStatus::Active) {
-      if (game.getCurrentActor() == seatIdx) {
-        game.playerAction(id, "fold");
-      } else {
-        seat.status = PlayerStatus::Folded;
-        foldedOutsideTurnFlow = true;
-      }
-    } else if (seat.status == PlayerStatus::AllIn) {
-      // Leave/stand should forfeit this hand, same as folding.
-      seat.status = PlayerStatus::Folded;
-      foldedOutsideTurnFlow = true;
-    }
-
-    if (foldedOutsideTurnFlow && game.activePlayerCount() == 1) {
-      for (int i = 0; i < game.config.maxSeats; i++) {
-        if (game.seats[i].status == PlayerStatus::Active ||
-            game.seats[i].status == PlayerStatus::AllIn) {
-          game.foldWinner = i;
-          break;
-        }
-      }
-      game.distributePot();
-    }
-
-    // Vacate seat immediately, but keep committed chips as dead money until
-    // hand settlement is complete.
-    const int preservedCurrentBet = seat.currentBet;
-    const int preservedTotalBet = seat.totalBet;
-    seat = Player();
-    seat.status = PlayerStatus::SittingOut;
-    seat.currentBet = preservedCurrentBet;
-    seat.totalBet = preservedTotalBet;
-    seat.id.clear();
-  } else {
-    seat = Player();
-    seat.status = PlayerStatus::SittingOut;
-    seat.id.clear();
-  }
+  if (!game.forfeitAndVacateSeat(id, handInProgress))
+    return false;
 
   for (auto &u : users) {
     if (u.id == id) {
@@ -215,18 +143,16 @@ bool Lobby::rebuy(std::string id, int amount) {
     return false;
   if (amount <= 0)
     return false;
+  return game.rebuyPlayer(id, amount);
+}
 
-  for (auto &p : game.seats) {
-    if (p.id == id) {
-      p.chips += amount;
-      if (p.chips > 0 && p.isConnected &&
-          p.status == PlayerStatus::SittingOut) {
-        p.status = PlayerStatus::Waiting;
-      }
-      return true;
-    }
-  }
-  return false; // Not seated
+bool Lobby::handleGameAction(const std::string &userId,
+                             const std::string &command, int amount) {
+  return game.playerAction(userId, command, amount);
+}
+
+bool Lobby::handleMuckOrShow(const std::string &userId, bool show) {
+  return game.playerMuckOrShow(userId, show);
 }
 
 bool Lobby::addChatMessage(const std::string &userId, const std::string &text) {
@@ -273,12 +199,7 @@ bool Lobby::startGame(std::string hostId) {
 
   cleanupOrphanedSeats();
 
-  int count = 0;
-  for (const auto &p : game.seats) {
-    if (p.status != PlayerStatus::SittingOut && p.chips > 0)
-      count++;
-  }
-  if (count < 2)
+  if (game.seatedPlayerCountWithChips() < 2)
     return false;
 
   gameInProgress = true;
@@ -291,38 +212,7 @@ bool Lobby::endGame(std::string hostId) {
     return false;
 
   gameInProgress = false;
-
-  // Reset transient hand state while preserving seated players, chips,
-  // and host/lobby membership.
-  game.stage = GameStage::Idle;
-  game.board.clear();
-  game.sidePots.clear();
-  game.showdownResults.clear();
-  game.isAllInShowdown = false;
-  game.foldWinner = -1;
-  game.pot = 0;
-  game.currentBet = 0;
-  game.minRaise = game.config.bigBlind;
-  game.currentActor = -1;
-  game.lastAggressor = -1;
-  game.sbPos = -1;
-  game.bbPos = -1;
-
-  for (auto &p : game.seats) {
-    p.hand.clear();
-    p.currentBet = 0;
-    p.totalBet = 0;
-    p.showCards = false;
-
-    if (p.id.empty()) {
-      p.status = PlayerStatus::SittingOut;
-    } else if (p.chips > 0 && p.isConnected) {
-      p.status = PlayerStatus::Waiting;
-    } else {
-      p.status = PlayerStatus::SittingOut;
-    }
-  }
-
+  game.resetForEndGame();
   return true;
 }
 
@@ -338,12 +228,7 @@ bool Lobby::startNextHand(std::string hostId) {
 
   cleanupOrphanedSeats();
 
-  int count = 0;
-  for (const auto &p : game.seats) {
-    if (p.status != PlayerStatus::SittingOut && p.chips > 0)
-      count++;
-  }
-  if (count < 2) {
+  if (game.seatedPlayerCountWithChips() < 2) {
     gameInProgress = false;
     return false;
   }
@@ -365,12 +250,7 @@ bool Lobby::updateConfig(std::string hostId, LobbyConfig newConfig) {
   gc.smallBlind = newConfig.smallBlind;
   gc.bigBlind = newConfig.bigBlind;
   gc.startingStack = newConfig.startingStack;
-  game.config = gc;
-
-  // Resize seats vector if maxSeats changed
-  if ((int)game.seats.size() != newConfig.maxSeats) {
-    game.seats.resize(newConfig.maxSeats);
-  }
+  game.applyConfig(gc);
 
   return true;
 }
@@ -386,19 +266,16 @@ bool Lobby::kickPlayer(std::string hostId, std::string targetId) {
 bool Lobby::setButtonPos(std::string hostId, int pos) {
   if (this->hostId != hostId)
     return false;
-  game.buttonPos = pos;
-  return true;
+  return game.setButtonPosition(pos);
 }
 
 // Test function
 
 void Lobby::setPlayerStack(int seatIndex, int amount) {
-  if (seatIndex >= 0 && seatIndex < (int)game.seats.size()) {
-    game.seats[seatIndex].chips = amount;
-  }
+  game.setSeatStackForTesting(seatIndex, amount);
 }
 
-void Lobby::setButtonPos(int pos) { game.buttonPos = pos; }
+void Lobby::setButtonPos(int pos) { game.setButtonPosition(pos); }
 
 // Connection Management
 
@@ -422,23 +299,8 @@ void Lobby::disconnectPlayer(const std::string &id) {
     }
   }
 
-  // Mark the player's seat as disconnected
-  for (auto &p : game.seats) {
-    if (p.id == id) {
-      p.isConnected = false;
-      break;
-    }
-  }
-
-  // If it's their turn, auto-check or auto-fold
-  int seatIdx = game.findSeatIndex(id);
-  if (seatIdx >= 0 && game.getCurrentActor() == seatIdx &&
-      game.getStage() != GameStage::Showdown &&
-      game.getStage() != GameStage::Idle) {
-    if (!game.playerAction(id, "check")) {
-      game.playerAction(id, "fold");
-    }
-  }
+  game.setPlayerConnected(id, false);
+  game.autoResolveDisconnectedTurn(id);
 }
 
 bool Lobby::reconnectPlayer(const std::string &id) {
@@ -454,17 +316,8 @@ bool Lobby::reconnectPlayer(const std::string &id) {
   if (!found)
     return false;
 
-  // Mark player seat as connected and ready for next hand
-  for (auto &p : game.seats) {
-    if (p.id == id) {
-      p.isConnected = true;
-      // mark as waiting so they get dealt into the next hand
-      if (p.status == PlayerStatus::SittingOut && p.chips > 0) {
-        p.status = PlayerStatus::Waiting;
-      }
-      break;
-    }
-  }
+  game.setPlayerConnected(id, true);
+  game.markWaitingIfEligible(id);
 
   bool hasConnectedHost = false;
   for (const auto &u : users) {
@@ -494,6 +347,7 @@ bool Lobby::reconnectPlayer(const std::string &id) {
 
 nlohmann::json
 Lobby::toJsonForViewer(const std::string &viewerId,
+                       bool includeEquities,
                        const nlohmann::json *cachedEquities) const {
   nlohmann::json state = *this; // Uses to_json(Lobby)
 
@@ -504,23 +358,21 @@ Lobby::toJsonForViewer(const std::string &viewerId,
 
   // God Mode: spectators see all cards + live equity
   if (viewerIsSpc && lobbyConfig.godMode) {
-    std::vector<std::vector<Card>> hands;
-    std::vector<int> handSeatIndices;
-
-    for (int i = 0; i < (int)game.seats.size(); i++) {
-      const auto &p = game.seats[i];
+    const auto &gameSeats = game.getSeats();
+    int visibleHandCount = 0;
+    for (int i = 0; i < static_cast<int>(gameSeats.size()); i++) {
+      const auto &p = gameSeats[i];
       if (p.hand.size() == 2 && p.status != PlayerStatus::Folded &&
           p.status != PlayerStatus::SittingOut &&
           p.status != PlayerStatus::Waiting) {
-        hands.push_back(p.hand);
-        handSeatIndices.push_back(i);
+        visibleHandCount++;
       }
     }
 
-    if (hands.size() >= 2) {
+    if (visibleHandCount >= 2) {
       if (cachedEquities) {
         state["equities"] = *cachedEquities;
-      } else {
+      } else if (includeEquities) {
         state["equities"] = computeEquities();
       }
     }
@@ -598,9 +450,10 @@ void to_json(nlohmann::json &j, const Lobby &l) {
 nlohmann::json Lobby::computeEquities() const {
   std::vector<std::vector<Card>> hands;
   std::vector<int> handSeatIndices;
+  const auto &gameSeats = game.getSeats();
 
-  for (int i = 0; i < (int)game.seats.size(); i++) {
-    const auto &p = game.seats[i];
+  for (int i = 0; i < static_cast<int>(gameSeats.size()); i++) {
+    const auto &p = gameSeats[i];
     if (p.hand.size() == 2 && p.status != PlayerStatus::Folded &&
         p.status != PlayerStatus::SittingOut &&
         p.status != PlayerStatus::Waiting) {

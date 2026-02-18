@@ -17,6 +17,8 @@ using WebSocket = uWS::WebSocket<false, true, PerSocketData>;
 poker::Lobby lobby;
 std::unordered_map<std::string, WebSocket *> connectedSockets;
 std::unordered_map<WebSocket *, std::string> socketOwners;
+json spectatorEquityCache = json::object();
+bool hasSpectatorEquityCache = false;
 
 bool isCurrentSocketForUser(WebSocket *ws, const std::string &userId) {
   auto it = connectedSockets.find(userId);
@@ -90,15 +92,24 @@ void bindSocketToUser(WebSocket *ws, const std::string &userId) {
 }
 
 // Send personalised state to every connected client
-void broadcastToAll() {
+void broadcastToAll(bool includeEquities = true) {
   json cachedEquities;
   json *equitiesPtr = nullptr;
 
   // Pre-calculate equities if God Mode is active
   // avoids running Monte Carlo sim for every spectator
   if (lobby.getLobbyConfig().godMode) {
-    cachedEquities = lobby.computeEquities();
-    equitiesPtr = &cachedEquities;
+    if (includeEquities) {
+      cachedEquities = lobby.computeEquities();
+      spectatorEquityCache = cachedEquities;
+      hasSpectatorEquityCache = true;
+      equitiesPtr = &cachedEquities;
+    } else if (hasSpectatorEquityCache) {
+      equitiesPtr = &spectatorEquityCache;
+    }
+  } else {
+    hasSpectatorEquityCache = false;
+    spectatorEquityCache = json::object();
   }
 
   std::string spectatorPayload;
@@ -112,7 +123,7 @@ void broadcastToAll() {
         json msg;
         msg["type"] = "gameState";
         // Use empty ID for generic spectator view
-        msg["data"] = lobby.toJsonForViewer("", equitiesPtr);
+        msg["data"] = lobby.toJsonForViewer("", includeEquities, equitiesPtr);
         spectatorPayload = msg.dump();
         spectatorPayloadReady = true;
       }
@@ -121,7 +132,7 @@ void broadcastToAll() {
       // Active players need unique views
       json msg;
       msg["type"] = "gameState";
-      msg["data"] = lobby.toJsonForViewer(userId, equitiesPtr);
+      msg["data"] = lobby.toJsonForViewer(userId, includeEquities, equitiesPtr);
       ws->send(msg.dump(), uWS::OpCode::TEXT);
     }
   }
@@ -153,6 +164,7 @@ int main() {
 
                    bool success = false;
                    std::string errorMsg;
+                   bool includeEquitiesInBroadcast = false;
 
                    if (action != "join" && !userData->userId.empty() &&
                        !isCurrentSocketForUser(ws, userData->userId)) {
@@ -206,31 +218,40 @@ int main() {
                      success = lobby.standPlayer(userData->userId);
                      if (!success)
                        errorMsg = "Could not stand";
+                     else
+                       includeEquitiesInBroadcast = true;
                    } else if (action == "start_game") {
                      success = lobby.startGame(userData->userId);
                      if (!success)
                        errorMsg = "Failed (not host or not enough players)";
+                     else
+                       includeEquitiesInBroadcast = true;
                    } else if (action == "start_next_hand") {
                      success = lobby.startNextHand(userData->userId);
                      if (!success)
                        errorMsg = "Failed (not host or game not started)";
+                     else
+                       includeEquitiesInBroadcast = true;
                    } else if (action == "game_action") {
                      std::string command = j.value("command", "");
                      int amount = j.value("amount", 0);
                      if (command.empty()) {
                        errorMsg = "Missing 'command' field";
                      } else {
-                       success = lobby.getGame().playerAction(userData->userId,
-                                                              command, amount);
+                       success =
+                           lobby.handleGameAction(userData->userId, command, amount);
                        if (!success)
                          errorMsg = "Invalid action (not your turn?)";
+                       else
+                         includeEquitiesInBroadcast = true;
                      }
                    } else if (action == "muck_show") {
                      bool show = j.value("show", false);
-                     success = lobby.getGame().playerMuckOrShow(
-                         userData->userId, show);
+                     success = lobby.handleMuckOrShow(userData->userId, show);
                      if (!success)
                        errorMsg = "Cannot muck/show right now";
+                     else
+                       includeEquitiesInBroadcast = true;
                    } else if (action == "rebuy") {
                      int amount = j.value("amount", 0);
                      if (amount <= 0) {
@@ -288,12 +309,15 @@ int main() {
                        } else {
                          errorMsg = "Failed (not host or invalid target)";
                        }
+                       if (success)
+                         includeEquitiesInBroadcast = true;
                      }
                    } else if (action == "leave") {
                      success = lobby.leave(userData->userId);
                      if (success) {
                        unbindUser(userData->userId);
                        userData->userId.clear();
+                       includeEquitiesInBroadcast = true;
                      }
                    } else {
                      errorMsg = "Unknown action: '" + action + "'";
@@ -301,7 +325,7 @@ int main() {
 
                    // Response
                    if (success) {
-                     broadcastToAll();
+                     broadcastToAll(includeEquitiesInBroadcast);
                    } else if (!errorMsg.empty()) {
                      json err;
                      err["type"] = "error";
@@ -341,7 +365,7 @@ int main() {
 
                  std::cout << "Client disconnected: " << userId << std::endl;
                  lobby.disconnectPlayer(userId);
-                 broadcastToAll();
+                 broadcastToAll(true);
                }})
       .listen(9001,
               [](auto *listen_socket) {

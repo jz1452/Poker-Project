@@ -44,6 +44,9 @@ public:
   int sitPlayer(std::string id, int seatIndex, int buyInAmount);
   bool standPlayer(std::string id);
   bool rebuy(std::string id, int amount);
+  bool handleGameAction(const std::string &userId, const std::string &command,
+                        int amount);
+  bool handleMuckOrShow(const std::string &userId, bool show);
   bool addChatMessage(const std::string &userId, const std::string &text);
 
   // Host actions
@@ -75,6 +78,7 @@ public:
   // Per-viewer serialisation (handles card masking & spectator view equities)
   nlohmann::json
   toJsonForViewer(const std::string &viewerId,
+                  bool includeEquities = true,
                   const nlohmann::json *cachedEquities = nullptr) const;
   nlohmann::json computeEquities() const;
 

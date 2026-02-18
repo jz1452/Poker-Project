@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <random>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace poker {
@@ -25,8 +26,6 @@ struct ShowdownResult {
 enum class GameStage { Idle, PreFlop, Flop, Turn, River, Showdown };
 
 class Game {
-  friend class Lobby;
-
 public:
   struct Config {
     int smallBlind = 5;
@@ -46,6 +45,21 @@ public:
   void startHand();
   bool playerAction(std::string id, std::string action, int amount = 0);
   bool playerMuckOrShow(std::string id, bool show);
+  bool sitPlayerAt(int seatIndex, const std::string &id, const std::string &name,
+                   int chips);
+  bool rebuyPlayer(const std::string &id, int amount);
+  bool forfeitAndVacateSeat(const std::string &id, bool handInProgress);
+  bool setPlayerConnected(const std::string &id, bool connected);
+  bool autoResolveDisconnectedTurn(const std::string &id);
+  bool markWaitingIfEligible(const std::string &id);
+  void removeOrphanedSeats(const std::unordered_set<std::string> &validUserIds);
+  int seatedPlayerCountWithChips() const;
+  void resetForEndGame();
+  void applyConfig(const Config &newConfig);
+  bool setButtonPosition(int pos);
+  void setSeatStackForTesting(int seatIndex, int amount);
+  int seatCount() const { return static_cast<int>(seats.size()); }
+  bool isSeatOpen(int seatIndex) const;
 
   // State accessors
   const std::vector<Player> &getSeats() const { return seats; }
@@ -96,11 +110,14 @@ private:
   void resolveSidePots();
   void distributePot();
   void checkShowdownResolved();
+  bool resolveIfSingleActiveRemains();
+  bool autoResolveDisconnectedTurnAtCurrentActor();
+  void autoRunoutRemainingStreets();
+  void vacateSeat(int seatIdx, bool preserveCommittedBets);
   bool bettingRoundComplete() const;
   int nextActorNeedingAction(int current) const;
   int bettingPlayerCount() const;
   int nextActivePlayer(int current);
-  int nextBettingPlayer(int current);
   int activePlayerCount() const;
 };
 

@@ -94,6 +94,218 @@ void Game::startHand() {
   stage = GameStage::PreFlop;
 }
 
+bool Game::isSeatOpen(int seatIndex) const {
+  if (seatIndex < 0 || seatIndex >= static_cast<int>(seats.size()))
+    return false;
+  return seats[seatIndex].status == PlayerStatus::SittingOut &&
+         seats[seatIndex].id.empty();
+}
+
+bool Game::sitPlayerAt(int seatIndex, const std::string &id,
+                       const std::string &name, int chips) {
+  if (chips <= 0)
+    return false;
+  if (!isSeatOpen(seatIndex))
+    return false;
+  if (findSeatIndex(id) >= 0)
+    return false;
+
+  auto &seat = seats[seatIndex];
+  seat = Player();
+  seat.id = id;
+  seat.name = name;
+  seat.chips = chips;
+  seat.status = PlayerStatus::Waiting;
+  seat.isConnected = true;
+  return true;
+}
+
+bool Game::rebuyPlayer(const std::string &id, int amount) {
+  if (amount <= 0)
+    return false;
+
+  for (auto &p : seats) {
+    if (p.id == id) {
+      p.chips += amount;
+      if (p.chips > 0 && p.isConnected && p.status == PlayerStatus::SittingOut) {
+        p.status = PlayerStatus::Waiting;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Game::forfeitAndVacateSeat(const std::string &id, bool handInProgress) {
+  int seatIdx = findSeatIndex(id);
+  if (seatIdx < 0)
+    return false;
+
+  Player &seat = seats[seatIdx];
+  const bool wasInCurrentHand =
+      handInProgress && (seat.status == PlayerStatus::Active ||
+                         seat.status == PlayerStatus::Folded ||
+                         seat.status == PlayerStatus::AllIn);
+
+  if (wasInCurrentHand) {
+    bool foldedOutsideTurnFlow = false;
+    if (seat.status == PlayerStatus::Active) {
+      if (currentActor == seatIdx) {
+        playerAction(id, "fold");
+      } else {
+        seat.status = PlayerStatus::Folded;
+        foldedOutsideTurnFlow = true;
+      }
+    } else if (seat.status == PlayerStatus::AllIn) {
+      // Leaving forfeits this hand.
+      seat.status = PlayerStatus::Folded;
+      foldedOutsideTurnFlow = true;
+    }
+
+    if (foldedOutsideTurnFlow) {
+      resolveIfSingleActiveRemains();
+    }
+
+    vacateSeat(seatIdx, true);
+    return true;
+  }
+
+  vacateSeat(seatIdx, false);
+  return true;
+}
+
+bool Game::setPlayerConnected(const std::string &id, bool connected) {
+  for (auto &p : seats) {
+    if (p.id == id) {
+      p.isConnected = connected;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Game::autoResolveDisconnectedTurn(const std::string &id) {
+  int seatIdx = findSeatIndex(id);
+  if (seatIdx < 0)
+    return false;
+  if (currentActor != seatIdx)
+    return false;
+  return autoResolveDisconnectedTurnAtCurrentActor();
+}
+
+bool Game::autoResolveDisconnectedTurnAtCurrentActor() {
+  if (stage == GameStage::Showdown || stage == GameStage::Idle)
+    return false;
+  if (currentActor < 0 || currentActor >= static_cast<int>(seats.size()))
+    return false;
+
+  const auto &p = seats[currentActor];
+  if (p.status != PlayerStatus::Active || p.isConnected)
+    return false;
+
+  if (!playerAction(p.id, "check")) {
+    return playerAction(p.id, "fold");
+  }
+  return true;
+}
+
+bool Game::markWaitingIfEligible(const std::string &id) {
+  for (auto &p : seats) {
+    if (p.id == id) {
+      if (p.status == PlayerStatus::SittingOut && p.chips > 0 && p.isConnected) {
+        p.status = PlayerStatus::Waiting;
+        return true;
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
+void Game::removeOrphanedSeats(
+    const std::unordered_set<std::string> &validUserIds) {
+  for (int i = 0; i < static_cast<int>(seats.size()); i++) {
+    const auto &p = seats[i];
+    if (p.id.empty())
+      continue;
+    if (validUserIds.find(p.id) != validUserIds.end())
+      continue;
+
+    vacateSeat(i, false);
+  }
+}
+
+int Game::seatedPlayerCountWithChips() const {
+  int count = 0;
+  for (const auto &p : seats) {
+    if (p.status != PlayerStatus::SittingOut && p.chips > 0)
+      count++;
+  }
+  return count;
+}
+
+void Game::resetForEndGame() {
+  stage = GameStage::Idle;
+  board.clear();
+  sidePots.clear();
+  showdownResults.clear();
+  isAllInShowdown = false;
+  foldWinner = -1;
+  pot = 0;
+  currentBet = 0;
+  minRaise = config.bigBlind;
+  currentActor = -1;
+  lastAggressor = -1;
+  sbPos = -1;
+  bbPos = -1;
+  hasActedThisStreet.assign(config.maxSeats, false);
+
+  for (auto &p : seats) {
+    p.hand.clear();
+    p.currentBet = 0;
+    p.totalBet = 0;
+    p.showCards = false;
+
+    if (p.id.empty()) {
+      p.status = PlayerStatus::SittingOut;
+    } else if (p.chips > 0 && p.isConnected) {
+      p.status = PlayerStatus::Waiting;
+    } else {
+      p.status = PlayerStatus::SittingOut;
+    }
+  }
+}
+
+void Game::applyConfig(const Config &newConfig) {
+  config = newConfig;
+  seats.resize(config.maxSeats);
+  hasActedThisStreet.resize(config.maxSeats, false);
+
+  if (buttonPos >= config.maxSeats)
+    buttonPos = -1;
+  if (currentActor >= config.maxSeats)
+    currentActor = -1;
+  if (sbPos >= config.maxSeats)
+    sbPos = -1;
+  if (bbPos >= config.maxSeats)
+    bbPos = -1;
+  if (lastAggressor >= config.maxSeats)
+    lastAggressor = -1;
+}
+
+bool Game::setButtonPosition(int pos) {
+  if (pos < -1 || pos >= config.maxSeats)
+    return false;
+  buttonPos = pos;
+  return true;
+}
+
+void Game::setSeatStackForTesting(int seatIndex, int amount) {
+  if (seatIndex >= 0 && seatIndex < static_cast<int>(seats.size())) {
+    seats[seatIndex].chips = amount;
+  }
+}
+
 // Next player who hasn't folded (includes All-In)
 int Game::nextActivePlayer(int current) {
   int idx = current;
@@ -101,18 +313,6 @@ int Game::nextActivePlayer(int current) {
     idx = (idx + 1) % config.maxSeats;
     if (seats[idx].status == PlayerStatus::Active ||
         seats[idx].status == PlayerStatus::AllIn) {
-      return idx;
-    }
-  }
-  return current;
-}
-
-// Next player who can still bet (Active only, skips All-In)
-int Game::nextBettingPlayer(int current) {
-  int idx = current;
-  for (int i = 0; i < config.maxSeats; i++) {
-    idx = (idx + 1) % config.maxSeats;
-    if (seats[idx].status == PlayerStatus::Active) {
       return idx;
     }
   }
@@ -178,17 +378,7 @@ bool Game::playerAction(std::string id, std::string action, int amount) {
     p.status = PlayerStatus::Folded;
     hasActedThisStreet[actorIndex] = true;
 
-    if (activePlayerCount() == 1) {
-      // Record fold-winner so they can optionally show
-      for (int i = 0; i < config.maxSeats; i++) {
-        if (seats[i].status == PlayerStatus::Active ||
-            seats[i].status == PlayerStatus::AllIn) {
-          foldWinner = i;
-          break;
-        }
-      }
-
-      distributePot();
+    if (resolveIfSingleActiveRemains()) {
       return true;
     }
   } else if (action == "call") {
@@ -294,34 +484,19 @@ void Game::nextTurn() {
 
   if (bettingRoundComplete()) {
     nextStreet();
-
-    // Auto-walk remaining streets when fewer than two players can bet.
-    while (stage != GameStage::Showdown && stage != GameStage::Idle &&
-           bettingPlayerCount() < 2 && activePlayerCount() > 1) {
-      nextStreet();
-    }
+    autoRunoutRemainingStreets();
     return;
   }
 
   int next = nextActorNeedingAction(currentActor);
   if (next < 0) {
     nextStreet();
-    while (stage != GameStage::Showdown && stage != GameStage::Idle &&
-           bettingPlayerCount() < 2 && activePlayerCount() > 1) {
-      nextStreet();
-    }
+    autoRunoutRemainingStreets();
     return;
   }
 
   currentActor = next;
-
-  // If next actor is disconnected, auto-fold/check
-  if (seats[currentActor].status == PlayerStatus::Active &&
-      !seats[currentActor].isConnected) {
-    if (!playerAction(seats[currentActor].id, "check")) {
-      playerAction(seats[currentActor].id, "fold");
-    }
-  }
+  autoResolveDisconnectedTurnAtCurrentActor();
 }
 
 void Game::nextStreet() {
@@ -362,17 +537,54 @@ void Game::nextStreet() {
     return;
 
   // Post-flop action starts left of button
-  currentActor = nextBettingPlayer(buttonPos);
+  currentActor = nextActorNeedingAction(buttonPos);
+  if (currentActor < 0)
+    return;
+  autoResolveDisconnectedTurnAtCurrentActor();
+}
 
-  // If start-of-street actor is disconnected, auto-fold/check recursively
-  if (seats[currentActor].status == PlayerStatus::Active &&
-      !seats[currentActor].isConnected) {
-    if (currentBet == seats[currentActor].currentBet) {
-      playerAction(seats[currentActor].id, "check");
-    } else {
-      playerAction(seats[currentActor].id, "fold");
+bool Game::resolveIfSingleActiveRemains() {
+  if (activePlayerCount() != 1)
+    return false;
+
+  for (int i = 0; i < config.maxSeats; i++) {
+    if (seats[i].status == PlayerStatus::Active ||
+        seats[i].status == PlayerStatus::AllIn) {
+      foldWinner = i;
+      break;
     }
   }
+
+  distributePot();
+  return true;
+}
+
+void Game::autoRunoutRemainingStreets() {
+  // If nobody (or only one player) can act, run board to showdown.
+  while (stage != GameStage::Showdown && stage != GameStage::Idle &&
+         bettingPlayerCount() < 2 && activePlayerCount() > 1) {
+    nextStreet();
+  }
+}
+
+void Game::vacateSeat(int seatIdx, bool preserveCommittedBets) {
+  if (seatIdx < 0 || seatIdx >= static_cast<int>(seats.size()))
+    return;
+
+  int preservedCurrentBet = 0;
+  int preservedTotalBet = 0;
+  if (preserveCommittedBets) {
+    preservedCurrentBet = seats[seatIdx].currentBet;
+    preservedTotalBet = seats[seatIdx].totalBet;
+  }
+
+  seats[seatIdx] = Player();
+  seats[seatIdx].status = PlayerStatus::SittingOut;
+  if (preserveCommittedBets) {
+    seats[seatIdx].currentBet = preservedCurrentBet;
+    seats[seatIdx].totalBet = preservedTotalBet;
+  }
+  seats[seatIdx].id.clear();
 }
 
 void Game::resolveSidePots() {
