@@ -49,7 +49,7 @@ public:
                    int chips);
   bool rebuyPlayer(const std::string &id, int amount);
   bool forfeitAndVacateSeat(const std::string &id, bool handInProgress);
-  bool setPlayerConnected(const std::string &id, bool connected);
+  bool setPlayerConnection(const std::string &id, bool connected);
   bool markWaitingIfEligible(const std::string &id);
   void removeOrphanedSeats(const std::unordered_set<std::string> &validUserIds);
   int seatedPlayerCountWithChips() const;
@@ -110,7 +110,7 @@ private:
   void distributePot();
   void checkShowdownResolved();
   bool resolveIfSingleActiveRemains();
-  bool autoResolveDisconnectedTurnAtCurrentActor();
+  bool autoResolveDisconnectedTurn();
   void autoRunoutRemainingStreets();
   void vacateSeat(int seatIdx, bool preserveCommittedBets);
   bool bettingRoundComplete() const;

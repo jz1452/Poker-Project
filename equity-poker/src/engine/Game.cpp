@@ -174,7 +174,7 @@ bool Game::forfeitAndVacateSeat(const std::string &id, bool handInProgress) {
   return true;
 }
 
-bool Game::setPlayerConnected(const std::string &id, bool connected) {
+bool Game::setPlayerConnection(const std::string &id, bool connected) {
   int seatIdx = findSeatIndex(id);
   if (seatIdx < 0)
     return false;
