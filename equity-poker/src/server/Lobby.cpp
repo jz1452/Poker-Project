@@ -297,19 +297,32 @@ bool Lobby::isSpectator(const std::string &id) const {
 }
 
 void Lobby::disconnectPlayer(const std::string &id) {
+  bool disconnectedHost = false;
   for (auto &u : users) {
     if (u.id == id) {
       u.isConnected = false;
       if (u.isHost || hostId == id) {
         u.isHost = false;
         hostId.clear();
+        disconnectedHost = true;
       }
       break;
     }
   }
 
-  game.setPlayerConnected(id, false);
+  game.setPlayerConnection(id, false);
+
+  if (disconnectedHost) {
+    for (auto &u : users) {
+      if (u.isConnected) {
+        u.isHost = true;
+        hostId = u.id;
+        break;
+      }
+    }
+  }
 }
+
 
 bool Lobby::reconnectPlayer(const std::string &id) {
   // Verify the user exists in the lobby and mark them connected.
@@ -324,7 +337,7 @@ bool Lobby::reconnectPlayer(const std::string &id) {
   if (!found)
     return false;
 
-  game.setPlayerConnected(id, true);
+  game.setPlayerConnection(id, true);
   game.markWaitingIfEligible(id);
 
   bool hasConnectedHost = false;
