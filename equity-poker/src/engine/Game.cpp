@@ -175,25 +175,20 @@ bool Game::forfeitAndVacateSeat(const std::string &id, bool handInProgress) {
 }
 
 bool Game::setPlayerConnected(const std::string &id, bool connected) {
-  for (auto &p : seats) {
-    if (p.id == id) {
-      p.isConnected = connected;
-      return true;
-    }
-  }
-  return false;
-}
-
-bool Game::autoResolveDisconnectedTurn(const std::string &id) {
   int seatIdx = findSeatIndex(id);
   if (seatIdx < 0)
     return false;
-  if (currentActor != seatIdx)
-    return false;
-  return autoResolveDisconnectedTurnAtCurrentActor();
+
+  seats[seatIdx].isConnected = connected;
+
+  if (!connected && seatIdx == currentActor) {
+    autoResolveDisconnectedTurn();
+  }
+
+  return true;
 }
 
-bool Game::autoResolveDisconnectedTurnAtCurrentActor() {
+bool Game::autoResolveDisconnectedTurn() {
   if (stage == GameStage::Showdown || stage == GameStage::Idle)
     return false;
   if (currentActor < 0 || currentActor >= static_cast<int>(seats.size()))
@@ -276,7 +271,19 @@ void Game::resetForEndGame() {
   }
 }
 
-void Game::applyConfig(const Config &newConfig) {
+bool Game::applyConfig(const Config &newConfig) {
+  if (newConfig.maxSeats < 2)
+    return false;
+
+  const int oldSeatCount = static_cast<int>(seats.size());
+  if (newConfig.maxSeats < oldSeatCount) {
+    for (int i = newConfig.maxSeats; i < oldSeatCount; i++) {
+      if (!seats[i].id.empty()) {
+        return false; // Reject configs that would silently drop occupied seats.
+      }
+    }
+  }
+
   config = newConfig;
   seats.resize(config.maxSeats);
   hasActedThisStreet.resize(config.maxSeats, false);
@@ -291,6 +298,8 @@ void Game::applyConfig(const Config &newConfig) {
     bbPos = -1;
   if (lastAggressor >= config.maxSeats)
     lastAggressor = -1;
+
+  return true;
 }
 
 bool Game::setButtonPosition(int pos) {
@@ -496,7 +505,7 @@ void Game::nextTurn() {
   }
 
   currentActor = next;
-  autoResolveDisconnectedTurnAtCurrentActor();
+  autoResolveDisconnectedTurn();
 }
 
 void Game::nextStreet() {
@@ -540,7 +549,7 @@ void Game::nextStreet() {
   currentActor = nextActorNeedingAction(buttonPos);
   if (currentActor < 0)
     return;
-  autoResolveDisconnectedTurnAtCurrentActor();
+  autoResolveDisconnectedTurn();
 }
 
 bool Game::resolveIfSingleActiveRemains() {

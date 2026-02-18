@@ -6,6 +6,13 @@
 
 namespace poker {
 
+// Forward declarations ensure ADL serializers are visible for JSON
+// object-initialiser conversions in this translation unit.
+void to_json(nlohmann::json &j, const Game &g);
+void to_json(nlohmann::json &j, const LobbyConfig &c);
+void to_json(nlohmann::json &j, const User &u);
+void to_json(nlohmann::json &j, const ChatMessage &m);
+
 static std::string trimCopy(const std::string &input) {
   size_t start = input.find_first_not_of(" \t\r\n");
   if (start == std::string::npos)
@@ -243,14 +250,16 @@ bool Lobby::updateConfig(std::string hostId, LobbyConfig newConfig) {
   if (gameInProgress)
     return false;
 
-  lobbyConfig = newConfig;
-
   Game::Config gc;
   gc.maxSeats = newConfig.maxSeats;
   gc.smallBlind = newConfig.smallBlind;
   gc.bigBlind = newConfig.bigBlind;
   gc.startingStack = newConfig.startingStack;
-  game.applyConfig(gc);
+  if (!game.applyConfig(gc)) {
+    return false;
+  }
+
+  lobbyConfig = newConfig;
 
   return true;
 }
@@ -300,7 +309,6 @@ void Lobby::disconnectPlayer(const std::string &id) {
   }
 
   game.setPlayerConnected(id, false);
-  game.autoResolveDisconnectedTurn(id);
 }
 
 bool Lobby::reconnectPlayer(const std::string &id) {
@@ -349,7 +357,14 @@ nlohmann::json
 Lobby::toJsonForViewer(const std::string &viewerId,
                        bool includeEquities,
                        const nlohmann::json *cachedEquities) const {
-  nlohmann::json state = *this; // Uses to_json(Lobby)
+  nlohmann::json state{
+      {"lobbyConfig", lobbyConfig},
+      {"users", users},
+      {"chatMessages", chatMessages},
+      {"hostId", hostId},
+      {"isGameInProgress", gameInProgress},
+      {"game", game},
+  };
 
   auto &seats = state["game"]["seats"];
   std::string stage = state["game"]["stage"];

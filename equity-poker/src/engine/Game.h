@@ -50,12 +50,11 @@ public:
   bool rebuyPlayer(const std::string &id, int amount);
   bool forfeitAndVacateSeat(const std::string &id, bool handInProgress);
   bool setPlayerConnected(const std::string &id, bool connected);
-  bool autoResolveDisconnectedTurn(const std::string &id);
   bool markWaitingIfEligible(const std::string &id);
   void removeOrphanedSeats(const std::unordered_set<std::string> &validUserIds);
   int seatedPlayerCountWithChips() const;
   void resetForEndGame();
-  void applyConfig(const Config &newConfig);
+  bool applyConfig(const Config &newConfig);
   bool setButtonPosition(int pos);
   void setSeatStackForTesting(int seatIndex, int amount);
   int seatCount() const { return static_cast<int>(seats.size()); }
