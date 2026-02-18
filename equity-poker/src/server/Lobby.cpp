@@ -6,8 +6,6 @@
 
 namespace poker {
 
-// Forward declarations ensure ADL serializers are visible for JSON
-// object-initialiser conversions in this translation unit.
 void to_json(nlohmann::json &j, const Game &g);
 void to_json(nlohmann::json &j, const LobbyConfig &c);
 void to_json(nlohmann::json &j, const User &u);
