@@ -22,6 +22,7 @@ class WsClient {
     this.reconnectAttempt = 0;
     this.shouldReconnect = false;
     this.joinPayload = null;
+    this.requestCounter = 0;
   }
 
   configure(handlers) {
@@ -45,7 +46,7 @@ class WsClient {
       this.handlers?.onOpen?.();
 
       if (this.joinPayload) {
-        this.send({ action: "join", ...this.joinPayload });
+        this.sendRequest("join", this.joinPayload);
       }
     };
 
@@ -94,12 +95,25 @@ class WsClient {
     }
   }
 
-  send(message) {
+  sendRequest(action, data = {}) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      return false;
+      return null;
     }
-    this.ws.send(JSON.stringify(message));
-    return true;
+    if (typeof action !== "string" || !action.trim()) {
+      return null;
+    }
+
+    const requestId = `req_${Date.now()}_${++this.requestCounter}`;
+    const envelope = {
+      v: 1,
+      id: requestId,
+      kind: "request",
+      action,
+      data: data && typeof data === "object" ? data : {}
+    };
+
+    this.ws.send(JSON.stringify(envelope));
+    return requestId;
   }
 }
 

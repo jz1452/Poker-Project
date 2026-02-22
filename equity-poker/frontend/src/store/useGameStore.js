@@ -106,9 +106,9 @@ export const useGameStore = create((set, get) => ({
   },
 
   sendAction: (action, payload = {}) => {
-    const sent = wsClient.send({ action, ...payload });
+    const requestId = wsClient.sendRequest(action, payload);
 
-    if (!sent) {
+    if (!requestId) {
       set((state) => ({
         connection: {
           ...state.connection,
@@ -126,6 +126,7 @@ export const useGameStore = create((set, get) => ({
       ui: {
         ...state.ui,
         pendingAction: {
+          requestId,
           action,
           startedAt: Date.now()
         }
@@ -139,12 +140,11 @@ export const useGameStore = create((set, get) => ({
     const trimmed = typeof message === "string" ? message.trim() : "";
     if (!trimmed) return false;
 
-    const sent = wsClient.send({
-      action: "chat",
+    const requestId = wsClient.sendRequest("chat", {
       message: trimmed.slice(0, 280)
     });
 
-    if (!sent) {
+    if (!requestId) {
       set((state) => ({
         connection: {
           ...state.connection,
@@ -157,11 +157,11 @@ export const useGameStore = create((set, get) => ({
       }));
     }
 
-    return sent;
+    return !!requestId;
   },
 
   leaveRoom: () => {
-    wsClient.send({ action: "leave" });
+    wsClient.sendRequest("leave", {});
     wsClient.setJoinPayload(null);
     wsClient.disconnect({ manual: true });
     clearSession();
@@ -254,8 +254,8 @@ export const useGameStore = create((set, get) => ({
   handleIncomingMessage: (msg) => {
     if (!msg || typeof msg !== "object") return;
 
-    if (msg.type === "kicked") {
-      const message = msg.message || "You were kicked from the room.";
+    if (msg.kind === "event" && msg.event === "kicked") {
+      const message = msg?.data?.message || "You were kicked from the room.";
       clearSession();
       wsClient.setJoinPayload(null);
       wsClient.disconnect({ manual: true });
@@ -282,12 +282,13 @@ export const useGameStore = create((set, get) => ({
       return;
     }
 
-    if (msg.type === "joinSuccess") {
-      const nextUserId = msg.userId || "";
-      const currentName = get().connection.playerName;
-      if (nextUserId) {
-        saveSession(nextUserId, currentName);
+    if (msg.kind === "response" && msg.ok === true) {
+      const nextUserId = typeof msg?.data?.userId === "string" ? msg.data.userId : "";
+      if (!nextUserId) {
+        return;
       }
+      const currentName = get().connection.playerName;
+      saveSession(nextUserId, currentName);
       set((state) => ({
         connection: {
           ...state.connection,
@@ -299,7 +300,7 @@ export const useGameStore = create((set, get) => ({
       return;
     }
 
-    if (msg.type === "gameState") {
+    if (msg.kind === "event" && msg.event === "game_state") {
       if (!msg.data || typeof msg.data !== "object") {
         const message = "Received invalid game state payload.";
         set((state) => ({
@@ -331,12 +332,17 @@ export const useGameStore = create((set, get) => ({
       return;
     }
 
-    if (msg.type === "error") {
-      const message = msg.message || "Server error.";
+    if (msg.kind === "response" && msg.ok === false) {
+      const errorCode =
+        typeof msg?.error?.code === "string" ? msg.error.code : "UNKNOWN_ERROR";
+      const message =
+        typeof msg?.error?.message === "string"
+          ? msg.error.message
+          : "Server error.";
       set((state) => ({
         connection: {
           ...state.connection,
-          lastError: message
+          lastError: `[${errorCode}] ${message}`
         },
         ui: {
           ...state.ui,

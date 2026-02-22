@@ -2,10 +2,23 @@
 #include "Lobby.h"
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <random>
 #include <string>
 #include <unordered_map>
 
 using json = nlohmann::json;
+
+namespace {
+
+constexpr int kProtocolVersion = 1;
+
+constexpr const char *kErrInvalidAction = "INVALID_ACTION";
+constexpr const char *kErrUnauthorized = "UNAUTHORIZED";
+constexpr const char *kErrStaleConnection = "STALE_CONNECTION";
+constexpr const char *kErrBadPayload = "BAD_PAYLOAD";
+constexpr const char *kErrInternalError = "INTERNAL_ERROR";
+
+} // namespace
 
 struct PerSocketData {
   std::string userId;
@@ -23,6 +36,19 @@ bool hasSpectatorEquityCache = false;
 bool isCurrentSocketForUser(WebSocket *ws, const std::string &userId) {
   auto it = connectedSockets.find(userId);
   return it != connectedSockets.end() && it->second == ws;
+}
+
+void sendJson(WebSocket *ws, const json &message) {
+  ws->send(message.dump(), uWS::OpCode::TEXT);
+}
+
+json makeEventEnvelope(const std::string &eventName, const json &data) {
+  json envelope = json::object();
+  envelope["v"] = kProtocolVersion;
+  envelope["kind"] = "event";
+  envelope["event"] = eventName;
+  envelope["data"] = data;
+  return envelope;
 }
 
 void unbindSocket(WebSocket *ws) {
@@ -120,23 +146,472 @@ void broadcastToAll(bool includeEquities = true) {
     // string.
     if (lobby.isSpectator(userId)) {
       if (!spectatorPayloadReady) {
-        json msg;
-        msg["type"] = "gameState";
-        // Use empty ID for generic spectator view
-        msg["data"] = lobby.toJsonForViewer("", includeEquities, equitiesPtr);
+        json msg = makeEventEnvelope("game_state",
+                                     lobby.toJsonForViewer("", includeEquities,
+                                                           equitiesPtr));
         spectatorPayload = msg.dump();
         spectatorPayloadReady = true;
       }
       ws->send(spectatorPayload, uWS::OpCode::TEXT);
     } else {
       // Active players need unique views
-      json msg;
-      msg["type"] = "gameState";
-      msg["data"] = lobby.toJsonForViewer(userId, includeEquities, equitiesPtr);
-      ws->send(msg.dump(), uWS::OpCode::TEXT);
+      json msg = makeEventEnvelope("game_state",
+                                   lobby.toJsonForViewer(userId, includeEquities,
+                                                         equitiesPtr));
+      sendJson(ws, msg);
     }
   }
 }
+
+namespace {
+
+struct ActionResult {
+  bool success = false;
+  std::string errorCode;
+  std::string errorMsg;
+  bool includeEquitiesInBroadcast = false;
+  json data = json::object();
+};
+
+struct ActionContext {
+  WebSocket *ws = nullptr;
+  PerSocketData *userData = nullptr;
+  const json &data;
+};
+
+using ActionHandler = ActionResult (*)(const ActionContext &);
+
+ActionResult makeSuccess() {
+  ActionResult result;
+  result.success = true;
+  return result;
+}
+
+ActionResult makeError(const std::string &code, const std::string &message) {
+  ActionResult result;
+  result.success = false;
+  result.errorCode = code;
+  result.errorMsg = message;
+  return result;
+}
+
+bool readRequiredString(const json &data, const char *key, std::string &out,
+                        ActionResult &error, bool allowEmpty = false) {
+  auto it = data.find(key);
+  if (it == data.end() || !it->is_string()) {
+    error = makeError(kErrBadPayload,
+                      std::string("Missing or invalid '") + key + "' field");
+    return false;
+  }
+
+  out = it->get<std::string>();
+  if (!allowEmpty && out.empty()) {
+    error = makeError(kErrBadPayload,
+                      std::string("Field '") + key + "' must not be empty");
+    return false;
+  }
+
+  return true;
+}
+
+bool readOptionalString(const json &data, const char *key, std::string &out,
+                        ActionResult &error) {
+  auto it = data.find(key);
+  if (it == data.end())
+    return true;
+  if (!it->is_string()) {
+    error = makeError(kErrBadPayload,
+                      std::string("Field '") + key + "' must be a string");
+    return false;
+  }
+  out = it->get<std::string>();
+  return true;
+}
+
+bool readRequiredInt(const json &data, const char *key, int &out,
+                     ActionResult &error) {
+  auto it = data.find(key);
+  if (it == data.end() || !it->is_number_integer()) {
+    error = makeError(kErrBadPayload,
+                      std::string("Missing or invalid '") + key + "' field");
+    return false;
+  }
+  out = it->get<int>();
+  return true;
+}
+
+bool readOptionalInt(const json &data, const char *key, int &out,
+                     ActionResult &error) {
+  auto it = data.find(key);
+  if (it == data.end())
+    return true;
+  if (!it->is_number_integer()) {
+    error = makeError(kErrBadPayload,
+                      std::string("Field '") + key + "' must be an integer");
+    return false;
+  }
+  out = it->get<int>();
+  return true;
+}
+
+bool readRequiredBool(const json &data, const char *key, bool &out,
+                      ActionResult &error) {
+  auto it = data.find(key);
+  if (it == data.end() || !it->is_boolean()) {
+    error = makeError(kErrBadPayload,
+                      std::string("Missing or invalid '") + key + "' field");
+    return false;
+  }
+  out = it->get<bool>();
+  return true;
+}
+
+bool readOptionalBool(const json &data, const char *key, bool &out,
+                      ActionResult &error) {
+  auto it = data.find(key);
+  if (it == data.end())
+    return true;
+  if (!it->is_boolean()) {
+    error = makeError(kErrBadPayload,
+                      std::string("Field '") + key + "' must be a boolean");
+    return false;
+  }
+  out = it->get<bool>();
+  return true;
+}
+
+ActionResult handleJoin(const ActionContext &ctx) {
+  std::string name;
+  ActionResult error;
+  if (!readRequiredString(ctx.data, "name", name, error)) {
+    return error;
+  }
+
+  std::string id;
+  if (!readOptionalString(ctx.data, "id", id, error)) {
+    return error;
+  }
+
+  if (id.empty()) {
+    std::random_device rd;
+    id = "user_" + std::to_string(rd() % 900000 + 100000);
+  }
+
+  ActionResult result = makeSuccess();
+
+  // Try reconnect first, then fresh join
+  if (lobby.reconnectPlayer(id)) {
+    bindSocketToUser(ctx.ws, id);
+    std::cout << "Player reconnected: " << id << std::endl;
+  } else if (lobby.join(id, name)) {
+    bindSocketToUser(ctx.ws, id);
+  } else {
+    return makeError(kErrInvalidAction, "Could not join");
+  }
+
+  result.data["userId"] = id;
+  return result;
+}
+
+ActionResult handleSit(const ActionContext &ctx) {
+  ActionResult error;
+  int seat = -1;
+  int buyIn = 0;
+
+  if (!readRequiredInt(ctx.data, "seatIndex", seat, error)) {
+    return error;
+  }
+  if (!readOptionalInt(ctx.data, "buyIn", buyIn, error)) {
+    return error;
+  }
+
+  if (lobby.sitPlayer(ctx.userData->userId, seat, buyIn) == -1) {
+    return makeError(kErrInvalidAction,
+                     "Could not sit (seat taken or invalid buy-in)");
+  }
+
+  return makeSuccess();
+}
+
+ActionResult handleStand(const ActionContext &ctx) {
+  if (!lobby.standPlayer(ctx.userData->userId)) {
+    return makeError(kErrInvalidAction, "Could not stand");
+  }
+
+  ActionResult result = makeSuccess();
+  result.includeEquitiesInBroadcast = true;
+  return result;
+}
+
+ActionResult handleStartGame(const ActionContext &ctx) {
+  if (!lobby.startGame(ctx.userData->userId)) {
+    return makeError(kErrInvalidAction, "Failed (not host or not enough players)");
+  }
+
+  ActionResult result = makeSuccess();
+  result.includeEquitiesInBroadcast = true;
+  return result;
+}
+
+ActionResult handleStartNextHand(const ActionContext &ctx) {
+  if (!lobby.startNextHand(ctx.userData->userId)) {
+    return makeError(kErrInvalidAction, "Failed (not host or game not started)");
+  }
+
+  ActionResult result = makeSuccess();
+  result.includeEquitiesInBroadcast = true;
+  return result;
+}
+
+ActionResult handleGameAction(const ActionContext &ctx) {
+  ActionResult error;
+  std::string command;
+  int amount = 0;
+
+  if (!readRequiredString(ctx.data, "command", command, error)) {
+    return error;
+  }
+  if (!readOptionalInt(ctx.data, "amount", amount, error)) {
+    return error;
+  }
+
+  if (!lobby.handleGameAction(ctx.userData->userId, command, amount)) {
+    return makeError(kErrInvalidAction, "Invalid action (not your turn?)");
+  }
+
+  ActionResult result = makeSuccess();
+  result.includeEquitiesInBroadcast = true;
+  return result;
+}
+
+ActionResult handleMuckShow(const ActionContext &ctx) {
+  ActionResult error;
+  bool show = false;
+  if (!readRequiredBool(ctx.data, "show", show, error)) {
+    return error;
+  }
+
+  if (!lobby.handleMuckOrShow(ctx.userData->userId, show)) {
+    return makeError(kErrInvalidAction, "Cannot muck/show right now");
+  }
+
+  ActionResult result = makeSuccess();
+  result.includeEquitiesInBroadcast = true;
+  return result;
+}
+
+ActionResult handleRebuy(const ActionContext &ctx) {
+  ActionResult error;
+  int amount = 0;
+  if (!readRequiredInt(ctx.data, "amount", amount, error)) {
+    return error;
+  }
+
+  if (amount <= 0) {
+    return makeError(kErrInvalidAction, "Invalid rebuy amount");
+  }
+
+  if (!lobby.rebuy(ctx.userData->userId, amount)) {
+    return makeError(kErrInvalidAction, "Rebuy failed (hand in progress?)");
+  }
+
+  return makeSuccess();
+}
+
+ActionResult handleChat(const ActionContext &ctx) {
+  ActionResult error;
+  std::string messageText;
+  if (!readRequiredString(ctx.data, "message", messageText, error, true)) {
+    return error;
+  }
+
+  if (!lobby.addChatMessage(ctx.userData->userId, messageText)) {
+    return makeError(kErrInvalidAction, "Invalid chat message");
+  }
+
+  return makeSuccess();
+}
+
+ActionResult handleUpdateConfig(const ActionContext &ctx) {
+  ActionResult error;
+  poker::LobbyConfig newConfig = lobby.getLobbyConfig();
+
+  if (!readOptionalInt(ctx.data, "maxSeats", newConfig.maxSeats, error)) {
+    return error;
+  }
+  if (!readOptionalInt(ctx.data, "startingStack", newConfig.startingStack,
+                       error)) {
+    return error;
+  }
+  if (!readOptionalInt(ctx.data, "smallBlind", newConfig.smallBlind, error)) {
+    return error;
+  }
+  if (!readOptionalInt(ctx.data, "bigBlind", newConfig.bigBlind, error)) {
+    return error;
+  }
+  if (!readOptionalInt(ctx.data, "actionTimeout", newConfig.actionTimeout,
+                       error)) {
+    return error;
+  }
+  if (!readOptionalBool(ctx.data, "godMode", newConfig.godMode, error)) {
+    return error;
+  }
+  if (!readOptionalString(ctx.data, "roomCode", newConfig.roomCode, error)) {
+    return error;
+  }
+
+  if (!lobby.updateConfig(ctx.userData->userId, newConfig)) {
+    return makeError(kErrInvalidAction, "Failed (not host or game in progress)");
+  }
+
+  return makeSuccess();
+}
+
+ActionResult handleEndGame(const ActionContext &ctx) {
+  if (!lobby.endGame(ctx.userData->userId)) {
+    return makeError(kErrInvalidAction, "Failed (not host)");
+  }
+
+  return makeSuccess();
+}
+
+ActionResult handleKickPlayer(const ActionContext &ctx) {
+  ActionResult error;
+  std::string targetId;
+
+  if (!readRequiredString(ctx.data, "targetId", targetId, error)) {
+    return error;
+  }
+
+  if (!lobby.kickPlayer(ctx.userData->userId, targetId)) {
+    return makeError(kErrInvalidAction,
+                     "Failed (not host or invalid target)");
+  }
+
+  // Also disconnect the kicked player's socket.
+  auto it = connectedSockets.find(targetId);
+  if (it != connectedSockets.end()) {
+    WebSocket *targetWs = it->second;
+    json kickedData = json::object();
+    kickedData["message"] = "You were kicked by the host.";
+    sendJson(targetWs, makeEventEnvelope("kicked", kickedData));
+    unbindUser(targetId);
+    targetWs->close();
+  }
+
+  ActionResult result = makeSuccess();
+  result.includeEquitiesInBroadcast = true;
+  return result;
+}
+
+ActionResult handleLeave(const ActionContext &ctx) {
+  if (!lobby.leave(ctx.userData->userId)) {
+    return makeError(kErrInvalidAction, "Could not leave");
+  }
+
+  unbindUser(ctx.userData->userId);
+  ctx.userData->userId.clear();
+
+  ActionResult result = makeSuccess();
+  result.includeEquitiesInBroadcast = true;
+  return result;
+}
+
+const std::unordered_map<std::string, ActionHandler> &getActionHandlers() {
+  static const std::unordered_map<std::string, ActionHandler> handlers = {
+      {"join", handleJoin},
+      {"sit", handleSit},
+      {"stand", handleStand},
+      {"start_game", handleStartGame},
+      {"start_next_hand", handleStartNextHand},
+      {"game_action", handleGameAction},
+      {"muck_show", handleMuckShow},
+      {"rebuy", handleRebuy},
+      {"chat", handleChat},
+      {"update_config", handleUpdateConfig},
+      {"end_game", handleEndGame},
+      {"kick_player", handleKickPlayer},
+      {"leave", handleLeave},
+  };
+  return handlers;
+}
+
+bool parseRequestEnvelope(const json &raw, std::string &requestId,
+                          std::string &action, json &data,
+                          ActionResult &error) {
+  if (!raw.is_object()) {
+    error = makeError(kErrBadPayload, "Payload must be a JSON object");
+    return false;
+  }
+
+  auto idIt = raw.find("id");
+  if (idIt != raw.end() && idIt->is_string()) {
+    requestId = idIt->get<std::string>();
+  }
+
+  if (idIt == raw.end() || !idIt->is_string() || requestId.empty()) {
+    error = makeError(kErrBadPayload,
+                      "Missing or invalid 'id' field (must be non-empty string)");
+    return false;
+  }
+
+  auto versionIt = raw.find("v");
+  if (versionIt == raw.end() || !versionIt->is_number_integer() ||
+      versionIt->get<int>() != kProtocolVersion) {
+    error = makeError(kErrBadPayload, "Missing or unsupported protocol version");
+    return false;
+  }
+
+  auto kindIt = raw.find("kind");
+  if (kindIt == raw.end() || !kindIt->is_string() ||
+      kindIt->get<std::string>() != "request") {
+    error = makeError(kErrBadPayload,
+                      "Missing or invalid 'kind' field (expected 'request')");
+    return false;
+  }
+
+  auto actionIt = raw.find("action");
+  if (actionIt == raw.end() || !actionIt->is_string() ||
+      actionIt->get<std::string>().empty()) {
+    error = makeError(kErrBadPayload,
+                      "Missing or invalid 'action' field");
+    return false;
+  }
+  action = actionIt->get<std::string>();
+
+  auto dataIt = raw.find("data");
+  if (dataIt == raw.end() || !dataIt->is_object()) {
+    error = makeError(kErrBadPayload,
+                      "Missing or invalid 'data' field (must be object)");
+    return false;
+  }
+  data = *dataIt;
+
+  return true;
+}
+
+json makeResponseEnvelope(const std::string &requestId,
+                          const ActionResult &result) {
+  json response = json::object();
+  response["v"] = kProtocolVersion;
+  response["kind"] = "response";
+  response["id"] = requestId.empty() ? json(nullptr) : json(requestId);
+  response["ok"] = result.success;
+
+  if (result.success) {
+    response["data"] = result.data;
+  } else {
+    json error = json::object();
+    error["code"] =
+        result.errorCode.empty() ? std::string(kErrInternalError) : result.errorCode;
+    error["message"] = result.errorMsg.empty() ? "Request failed" : result.errorMsg;
+    response["error"] = error;
+  }
+
+  return response;
+}
+
+} // namespace
 
 int main() {
   std::cout << "Starting Game Server on port 9001..." << std::endl;
@@ -149,197 +624,63 @@ int main() {
            .idleTimeout = 120,
 
            .open =
-               [](WebSocket *ws) {
+               [](WebSocket * /*ws*/) {
                  std::cout << "Client connected!" << std::endl;
                },
 
            .message =
-               [](WebSocket *ws, std::string_view message, uWS::OpCode opCode) {
+               [](WebSocket *ws, std::string_view message,
+                  uWS::OpCode /*opCode*/) {
                  try {
-                   auto j = json::parse(message);
-                   std::string action = j.value("action", "");
+                   auto raw = json::parse(message);
                    PerSocketData *userData = ws->getUserData();
 
                    std::cout << "Received: " << message << std::endl;
 
-                   bool success = false;
-                   std::string errorMsg;
-                   bool includeEquitiesInBroadcast = false;
+                   std::string requestId;
+                   std::string action;
+                   json data = json::object();
+                   ActionResult result;
 
-                   if (action != "join" && !userData->userId.empty() &&
-                       !isCurrentSocketForUser(ws, userData->userId)) {
-                     errorMsg = "Stale connection. Please reconnect.";
-                   } else if (action == "join") {
-                     std::string name = j.value("name", "");
-                     std::string id = j.value("id", "");
-                     if (name.empty()) {
-                       errorMsg = "Missing 'name' field";
-                     } else {
-                       if (id.empty()) {
-                         std::random_device rd;
-                         id = "user_" + std::to_string(rd() % 900000 + 100000);
-                       }
-                       // Try reconnect first, then fresh join
-                       if (lobby.reconnectPlayer(id)) {
-                         bindSocketToUser(ws, id);
-                         std::cout << "Player reconnected: " << id << std::endl;
-                         success = true;
-                       } else if (lobby.join(id, name)) {
-                         bindSocketToUser(ws, id);
-                         success = true;
-                       } else {
-                         errorMsg = "Could not join";
-                       }
-                       // Send assigned ID back to client
-                       if (success) {
-                         json joinResp;
-                         joinResp["type"] = "joinSuccess";
-                         joinResp["userId"] = id;
-                         ws->send(joinResp.dump(), uWS::OpCode::TEXT);
-                       }
-                     }
-                   } else if (action == "sit") {
-                     if (userData->userId.empty()) {
-                       errorMsg = "Must join first";
-                     } else {
-                       int seat = j.value("seatIndex", -1);
-                       int buyIn = j.value("buyIn", 0);
-                       if (seat < 0) {
-                         errorMsg = "Missing 'seatIndex'";
-                       } else if (lobby.sitPlayer(userData->userId, seat,
-                                                  buyIn) != -1) {
-                         success = true;
-                       } else {
-                         errorMsg =
-                             "Could not sit (seat taken or invalid buy-in)";
-                       }
-                     }
-                   } else if (action == "stand") {
-                     success = lobby.standPlayer(userData->userId);
-                     if (!success)
-                       errorMsg = "Could not stand";
-                     else
-                       includeEquitiesInBroadcast = true;
-                   } else if (action == "start_game") {
-                     success = lobby.startGame(userData->userId);
-                     if (!success)
-                       errorMsg = "Failed (not host or not enough players)";
-                     else
-                       includeEquitiesInBroadcast = true;
-                   } else if (action == "start_next_hand") {
-                     success = lobby.startNextHand(userData->userId);
-                     if (!success)
-                       errorMsg = "Failed (not host or game not started)";
-                     else
-                       includeEquitiesInBroadcast = true;
-                   } else if (action == "game_action") {
-                     std::string command = j.value("command", "");
-                     int amount = j.value("amount", 0);
-                     if (command.empty()) {
-                       errorMsg = "Missing 'command' field";
-                     } else {
-                       success =
-                           lobby.handleGameAction(userData->userId, command, amount);
-                       if (!success)
-                         errorMsg = "Invalid action (not your turn?)";
-                       else
-                         includeEquitiesInBroadcast = true;
-                     }
-                   } else if (action == "muck_show") {
-                     bool show = j.value("show", false);
-                     success = lobby.handleMuckOrShow(userData->userId, show);
-                     if (!success)
-                       errorMsg = "Cannot muck/show right now";
-                     else
-                       includeEquitiesInBroadcast = true;
-                   } else if (action == "rebuy") {
-                     int amount = j.value("amount", 0);
-                     if (amount <= 0) {
-                       errorMsg = "Invalid rebuy amount";
-                     } else {
-                       success = lobby.rebuy(userData->userId, amount);
-                       if (!success)
-                         errorMsg = "Rebuy failed (hand in progress?)";
-                     }
-                   } else if (action == "chat") {
-                     if (userData->userId.empty()) {
-                       errorMsg = "Must join first";
-                     } else {
-                       std::string messageText = j.value("message", "");
-                       success =
-                           lobby.addChatMessage(userData->userId, messageText);
-                       if (!success)
-                         errorMsg = "Invalid chat message";
-                     }
-                   } else if (action == "update_config") {
-                     poker::LobbyConfig newConfig;
-                     newConfig.maxSeats = j.value("maxSeats", 6);
-                     newConfig.startingStack = j.value("startingStack", 1000);
-                     newConfig.smallBlind = j.value("smallBlind", 5);
-                     newConfig.bigBlind = j.value("bigBlind", 10);
-                     newConfig.actionTimeout = j.value("actionTimeout", 30);
-                     newConfig.godMode = j.value("godMode", true);
-                     newConfig.roomCode =
-                         j.value("roomCode", lobby.getLobbyConfig().roomCode);
-                     success = lobby.updateConfig(userData->userId, newConfig);
-                     if (!success)
-                       errorMsg = "Failed (not host or game in progress)";
-                   } else if (action == "end_game") {
-                     success = lobby.endGame(userData->userId);
-                     if (!success)
-                       errorMsg = "Failed (not host)";
-                   } else if (action == "kick_player") {
-                     std::string targetId = j.value("targetId", "");
-                     if (targetId.empty()) {
-                       errorMsg = "Missing 'targetId' field";
-                     } else {
-                       success = lobby.kickPlayer(userData->userId, targetId);
-                       if (success) {
-                         // Also disconnect the kicked player's socket
-                         auto it = connectedSockets.find(targetId);
-                         if (it != connectedSockets.end()) {
-                           WebSocket *targetWs = it->second;
-                           json kickedResp;
-                           kickedResp["type"] = "kicked";
-                           kickedResp["message"] = "You were kicked by the host.";
-                           targetWs->send(kickedResp.dump(), uWS::OpCode::TEXT);
-                           unbindUser(targetId);
-                           targetWs->close();
-                         }
-                       } else {
-                         errorMsg = "Failed (not host or invalid target)";
-                       }
-                       if (success)
-                         includeEquitiesInBroadcast = true;
-                     }
-                   } else if (action == "leave") {
-                     success = lobby.leave(userData->userId);
-                     if (success) {
-                       unbindUser(userData->userId);
-                       userData->userId.clear();
-                       includeEquitiesInBroadcast = true;
-                     }
+                   if (!parseRequestEnvelope(raw, requestId, action, data,
+                                             result)) {
+                     sendJson(ws, makeResponseEnvelope(requestId, result));
+                     return;
+                   }
+
+                   if (action != "join" && userData->userId.empty()) {
+                     result = makeError(kErrUnauthorized, "Must join first");
+                   } else if (action != "join" &&
+                              !isCurrentSocketForUser(ws, userData->userId)) {
+                     result = makeError(kErrStaleConnection,
+                                        "Stale connection. Please reconnect.");
                    } else {
-                     errorMsg = "Unknown action: '" + action + "'";
+                     const auto &handlers = getActionHandlers();
+                     auto handlerIt = handlers.find(action);
+                     if (handlerIt == handlers.end()) {
+                       result = makeError(kErrInvalidAction,
+                                          "Unknown action: '" + action + "'");
+                     } else {
+                       result =
+                           handlerIt->second(ActionContext{ws, userData, data});
+                     }
                    }
 
-                   // Response
-                   if (success) {
-                     broadcastToAll(includeEquitiesInBroadcast);
-                   } else if (!errorMsg.empty()) {
-                     json err;
-                     err["type"] = "error";
-                     err["message"] = errorMsg;
-                     ws->send(err.dump(), opCode);
+                   sendJson(ws, makeResponseEnvelope(requestId, result));
+
+                   if (result.success) {
+                     broadcastToAll(result.includeEquitiesInBroadcast);
                    }
 
-                 } catch (const json::exception &e) {
-                   json err;
-                   err["type"] = "error";
-                   err["message"] = std::string("Invalid JSON: ") + e.what();
-                   ws->send(err.dump(), uWS::OpCode::TEXT);
+                 } catch (const json::exception &) {
+                   ActionResult parseError =
+                       makeError(kErrBadPayload, "Invalid JSON payload");
+                   sendJson(ws, makeResponseEnvelope("", parseError));
                  } catch (const std::exception &e) {
                    std::cerr << "Error: " << e.what() << std::endl;
+                   ActionResult internalError =
+                       makeError(kErrInternalError, "Internal server error");
+                   sendJson(ws, makeResponseEnvelope("", internalError));
                  }
                },
 
