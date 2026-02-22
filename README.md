@@ -5,13 +5,12 @@ A full-stack, real-time Texas Hold'em project built with a custom C++ game engin
 ## Project Overview
 
 This project is a multiplayer poker app where users can join a room, sit at a table, play live hands, spectate ongoing games, and view equity information.  
-The project focuses on game-state correctness, reconnect-friendly sessions, and practical full-stack system design.
 
 ## Features
 
 - Real-time multiplayer table with host, player, and spectator roles
 - Full hand lifecycle support (blinds, betting rounds, all-ins, side pots, showdown/muck)
-- Perfect Hash hand evaluator (Cactus Kev-style) for fast hand ranking
+- Perfect Hash hand evaluator for fast hand ranking
 - Monte Carlo equity simulation engine for live spectator equity updates
 - Reconnect flow with identity persistence and host failover logic
 - Live chat and spectator tools
@@ -19,7 +18,7 @@ The project focuses on game-state correctness, reconnect-friendly sessions, and 
 
 ## Tech Stack
 
-- Backend: C++17, uWebSockets, nlohmann/json
+- Backend: C++17, uWebSockets
 - Frontend: React 18, Vite, Zustand, JavaScript
 
 ## Quick Start
